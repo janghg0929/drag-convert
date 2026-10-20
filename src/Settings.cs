@@ -8,36 +8,15 @@ namespace ShiftConvert
     // 설정: %APPDATA%\DragConvert\settings.ini (한 줄에 키=값)
     static class Settings
     {
-        // 드래그 중에 누르면 원형 메뉴가 뜨는 키
-        public class TriggerKey
-        {
-            public string Id, Label, Note;
-            public string Obj; // 목적격 조사: "Shift를", "Ctrl을"
-            public int Vk;
-            public string LabelObj { get { return Label + Obj; } }
-        }
-
-        public static readonly TriggerKey[] Triggers =
-        {
-            new TriggerKey { Id = "shift", Vk = 0x10, Label = "Shift", Obj = "를", Note = "원 바깥에 놓으면 파일이 이동돼요 (Windows 기본 동작)" },
-            new TriggerKey { Id = "space", Vk = 0x20, Label = "스페이스바", Obj = "를", Note = "탐색기의 다른 기능과 겹치지 않아요" },
-            new TriggerKey { Id = "ctrl", Vk = 0x11, Label = "Ctrl", Obj = "을", Note = "원 바깥에 놓으면 파일이 복사돼요 (Windows 기본 동작)" },
-            new TriggerKey { Id = "alt", Vk = 0x12, Label = "Alt", Obj = "를", Note = "원 바깥에 놓으면 바로가기가 만들어져요 (Windows 기본 동작)" },
-        };
-
-        public static string Trigger = "shift";
+        // 드래그 중에 누르면 원형 메뉴가 뜨는 키 (가상 키 코드). 마우스 가운데·옆 버튼도 가능
+        public const int DefaultTriggerVk = 0x10; // Shift
+        public static int TriggerVk = DefaultTriggerVk;
         public static bool Enabled = true;
         public static bool ShowWindowOnStart = true;
         public static bool CloseHintShown;
 
-        public static TriggerKey CurrentTrigger
-        {
-            get
-            {
-                foreach (TriggerKey t in Triggers) if (t.Id == Trigger) return t;
-                return Triggers[0];
-            }
-        }
+        public static string TriggerName { get { return KeyNames.Name(TriggerVk); } }
+        public static string TriggerPhrase { get { return KeyNames.Phrase(TriggerVk); } } // "Shift 키를", "마우스 뒤로 버튼을"
 
         static string FilePath
         {
@@ -58,7 +37,19 @@ namespace ShiftConvert
                     if (i > 0) d[line.Substring(0, i).Trim()] = line.Substring(i + 1).Trim();
                 }
                 string v;
-                if (d.TryGetValue("trigger", out v)) Trigger = v;
+                int vk;
+                if (d.TryGetValue("triggerVk", out v) && int.TryParse(v, out vk) && KeyNames.ForbiddenReason(vk) == null) TriggerVk = vk;
+                else if (d.TryGetValue("trigger", out v))
+                {
+                    // 예전 형식(이름으로 저장) 호환
+                    switch (v)
+                    {
+                        case "space": TriggerVk = 0x20; break;
+                        case "ctrl": TriggerVk = 0x11; break;
+                        case "alt": TriggerVk = 0x12; break;
+                        default: TriggerVk = 0x10; break;
+                    }
+                }
                 if (d.TryGetValue("enabled", out v)) Enabled = v != "0";
                 if (d.TryGetValue("showWindowOnStart", out v)) ShowWindowOnStart = v != "0";
                 if (d.TryGetValue("closeHintShown", out v)) CloseHintShown = v == "1";
@@ -72,7 +63,7 @@ namespace ShiftConvert
             {
                 Directory.CreateDirectory(Folder);
                 File.WriteAllText(FilePath,
-                    "trigger=" + Trigger + "\r\n" +
+                    "triggerVk=" + TriggerVk + "\r\n" +
                     "enabled=" + (Enabled ? "1" : "0") + "\r\n" +
                     "showWindowOnStart=" + (ShowWindowOnStart ? "1" : "0") + "\r\n" +
                     "closeHintShown=" + (CloseHintShown ? "1" : "0") + "\r\n",

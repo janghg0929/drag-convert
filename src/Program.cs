@@ -141,6 +141,7 @@ namespace ShiftConvert
         MainForm main;
 
         bool btnPrev, armed, keyHeldAtStart, shownThisDrag;
+        readonly DragHook hook = new DragHook(); // 끄는 동안에만 지정 키를 가로챔
         Point downPt;
 
         public readonly bool Elevated;
@@ -161,7 +162,7 @@ namespace ShiftConvert
             Elevated = IsElevated();
             Log.Info("시작: 버전 " + AppVersion.Current + ", " + WindowsVersion() +
                      (Elevated ? ", 관리자 권한" : "") + (silent ? ", 자동 실행" : "") + (updated ? ", 업데이트 직후" : "") +
-                     ", 키 " + Settings.CurrentTrigger.Label);
+                     ", 키 " + Settings.TriggerName);
 
             popup = new PopupForm();
             var h = popup.Handle; // 핸들을 미리 만들어 드롭 타깃 등록
@@ -208,7 +209,7 @@ namespace ShiftConvert
             if (Elevated)
                 Toast("관리자 권한으로 실행 중이에요", "이 상태에서는 끌어 놓기가 막혀요. 창에서 '일반 권한으로 다시 시작'을 눌러 주세요.", ToolTipIcon.Warning);
             if (firstRun || Elevated || (!silent && Settings.ShowWindowOnStart)) ShowMain();
-            else if (!silent && !updated) Toast("끌어서 변환 실행 중", "탐색기에서 파일을 끌다가 " + Settings.CurrentTrigger.LabelObj + " 누르면 원형 메뉴가 떠요.");
+            else if (!silent && !updated) Toast("끌어서 변환 실행 중", "탐색기에서 파일을 끌다가 " + Settings.TriggerPhrase + " 누르면 원형 메뉴가 떠요.");
 
             timer = new System.Windows.Forms.Timer();
             timer.Interval = 15;
@@ -220,18 +221,21 @@ namespace ShiftConvert
         {
             int btn = Native.GetSystemMetrics(Native.SM_SWAPBUTTON) != 0 ? Native.VK_RBUTTON : Native.VK_LBUTTON;
             bool down = Native.Down(btn);
-            bool key = Native.Down(Settings.CurrentTrigger.Vk);
+            int vk = Settings.TriggerVk;
             Point p = Cursor.Position;
 
             if (down && !btnPrev)
             {
                 downPt = p;
                 // 키를 누른 채 시작한 드래그(Shift 범위 선택 등)는 무시 — 드래그 도중에 새로 누른 키만 신호로 본다
-                keyHeldAtStart = key;
+                keyHeldAtStart = KeyNames.IsDown(vk);
                 shownThisDrag = false;
                 // (숨겨진 팝업의 옛 위치는 무시 — 안 그러면 마지막으로 뜬 자리에서 기능이 안 켜짐)
                 armed = Settings.Enabled && !(popup.Visible && popup.Bounds.Contains(p)) && IsExplorerAt(p);
+                if (armed) hook.Start(vk);
             }
+            // 가로채는 중에는 키 눌림이 Windows 키 상태에 안 남으므로 가로채기 쪽 상태를 본다
+            bool key = hook.Active ? hook.TriggerDown : KeyNames.IsDown(vk);
             if (down && armed)
             {
                 if (!key) keyHeldAtStart = false;
@@ -242,7 +246,11 @@ namespace ShiftConvert
                     popup.ShowAt(p);
                 }
             }
-            if (!down && btnPrev && popup.Visible) popup.MouseReleased();
+            if (!down && btnPrev)
+            {
+                hook.Stop(); // 마우스를 떼면 바로 원래대로
+                if (popup.Visible) popup.MouseReleased();
+            }
             btnPrev = down;
         }
 
@@ -278,18 +286,19 @@ namespace ShiftConvert
             RefreshMain();
         }
 
-        public void SetTrigger(string id)
+        public void SetTrigger(int vk)
         {
-            Settings.Trigger = id;
+            if (KeyNames.ForbiddenReason(vk) != null) return;
+            Settings.TriggerVk = vk;
             Settings.Save();
-            Log.Info("메뉴 키 변경: " + Settings.CurrentTrigger.Label);
+            Log.Info("메뉴 키 변경: " + Settings.TriggerName);
             UpdateTrayText();
             RefreshMain();
         }
 
         void UpdateTrayText()
         {
-            string t = "끌어서 변환 " + AppVersion.Current + (Settings.Enabled ? " — 끌면서 " + Settings.CurrentTrigger.Label : " — 꺼짐");
+            string t = "끌어서 변환 " + AppVersion.Current + (Settings.Enabled ? " — 끌면서 " + Settings.TriggerName : " — 꺼짐");
             tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
         }
 
@@ -581,6 +590,7 @@ namespace ShiftConvert
         protected override void ExitThreadCore()
         {
             Exiting = true;
+            hook.Stop();
             timer.Stop();
             updateTimer.Stop();
             tray.Visible = false;

@@ -26,7 +26,11 @@ namespace ShiftConvert
 
         Label statusText, howTo, updateText;
         CheckBox enabledBox, autoStartBox, showOnStartBox;
-        RadioButton[] keyRadios;
+        Label keyLabel, keyNote;
+        Button keyBtn;
+        readonly Timer captureTimer = new Timer { Interval = 15 };
+        bool capturing;
+        bool[] downAtCaptureStart;
         Button updateBtn;
         TextBox logBox;
         bool loading;
@@ -83,23 +87,28 @@ namespace ShiftConvert
             howTo = Para(how, "", Fg, Font);
             Para(how, "· 원의 가운데에 놓으면 아무 일도 하지 않아요 (취소)\n· 변환 중에 가운데를 누르면 변환을 멈춰요\n· 완료 표시를 누르면 새 파일이 있는 폴더가 열려요\n· 원본 파일은 그대로 남고, 새 파일이 같은 폴더에 생겨요", Muted, small);
 
-            // ---- 단축키
+            // ---- 단축키: '키 변경'을 누르고 원하는 키(또는 마우스 가운데·옆 버튼)를 누르면 그 키로 바뀜
             var keys = CardBox(root, "원형 메뉴를 띄우는 키");
-            Para(keys, "파일을 끄는 도중에 이 키를 누르면 원형 메뉴가 떠요.", Muted, small);
-            keyRadios = new RadioButton[Settings.Triggers.Length];
-            for (int i = 0; i < Settings.Triggers.Length; i++)
+            Para(keys, "파일을 끄는 도중에 이 키를 누르면 원형 메뉴가 떠요. 키보드 키 하나나 마우스 가운데·옆 버튼을 쓸 수 있어요.", Muted, small);
+            keyLabel = new Label
             {
-                Settings.TriggerKey t = Settings.Triggers[i];
-                var r = new RadioButton
-                {
-                    Text = t.Label, AutoSize = true, ForeColor = Fg, Tag = t.Id,
-                    Margin = new Padding(0, Px(i == 0 ? 6 : 4), 0, 0)
-                };
-                r.CheckedChanged += (s, e) => { var rb = (RadioButton)s; if (!loading && rb.Checked) app.SetTrigger((string)rb.Tag); };
-                keys.Controls.Add(r);
-                keyRadios[i] = r;
-                Para(keys, t.Note, Muted, small).Margin = new Padding(Px(20), 0, 0, 0);
-            }
+                AutoSize = true, Font = new Font("Malgun Gothic", 13f, FontStyle.Bold), ForeColor = Fg, BackColor = ButtonBg,
+                Padding = new Padding(Px(14), Px(5), Px(14), Px(5)), Margin = new Padding(0, Px(8), 0, Px(2))
+            };
+            keys.Controls.Add(keyLabel);
+            var keyRow = Row(keys);
+            keyBtn = Btn(keyRow, "키 변경", Accent);
+            keyBtn.Click += (s, e) => { if (capturing) StopCapture("바꾸지 않았어요", Muted); else StartCapture(); };
+            Btn(keyRow, "기본값(Shift)으로", ButtonBg).Click += (s, e) =>
+            {
+                StopCapture(null, Muted);
+                app.SetTrigger(Settings.DefaultTriggerVk);
+                ShowKeyNote("Shift 키로 되돌렸어요", Good);
+            };
+            keyNote = Para(keys, "", Muted, small);
+            Para(keys, "끄는 동안에는 이 키를 이 프로그램이 먼저 받아서 탐색기에는 전달되지 않아요. 평소에는 원래대로 동작해요. (Esc·Delete·Enter·Windows 키는 지정할 수 없어요)", Muted, small);
+            captureTimer.Tick += (s, e) => CaptureTick();
+            KeyPreview = true;
 
             // ---- 시작 설정
             var start = CardBox(root, "시작 설정");
@@ -186,12 +195,12 @@ namespace ShiftConvert
         public void RefreshAll()
         {
             loading = true;
-            string key = Settings.CurrentTrigger.LabelObj;
+            string key = Settings.TriggerPhrase;
             statusText.Text = Settings.Enabled ? "● 켜져 있어요 — 탐색기에서 파일을 끌다가 " + key + " 누르세요" : "○ 꺼져 있어요";
             statusText.ForeColor = Settings.Enabled ? Good : Muted;
             enabledBox.Checked = Settings.Enabled;
             howTo.Text = "1. 탐색기나 바탕화면에서 파일을 마우스로 끌기 시작해요\n2. 끄는 도중에 " + key + " 누르면 커서 주위에 원형 메뉴가 떠요\n3. 원하는 형식 칸에 놓으면 변환돼요";
-            foreach (RadioButton r in keyRadios) r.Checked = (string)r.Tag == Settings.CurrentTrigger.Id;
+            keyLabel.Text = Settings.TriggerName;
             autoStartBox.Checked = app.IsAutoStart();
             showOnStartBox.Checked = Settings.ShowWindowOnStart;
             updateText.Text = app.UpdateStatus;
@@ -202,6 +211,68 @@ namespace ShiftConvert
             logBox.SelectionStart = logBox.TextLength;
             logBox.ScrollToCaret();
             loading = false;
+        }
+
+        // ---------------- 키 변경 ----------------
+
+        void StartCapture()
+        {
+            capturing = true;
+            // 지금 이미 눌려 있는 키(방금 누른 마우스 버튼 등)는 무시하고, 새로 눌리는 것만 받음
+            downAtCaptureStart = new bool[256];
+            for (int v = 1; v < 256; v++) downAtCaptureStart[v] = KeyNames.IsDown(v);
+            keyBtn.Text = "원하는 키를 누르세요… (Esc: 취소)";
+            keyBtn.BackColor = Warn;
+            keyNote.Text = "";
+            ActiveControl = null; // 스페이스바·Enter가 버튼을 누르지 않게
+            captureTimer.Start();
+        }
+
+        void CaptureTick()
+        {
+            for (int v = 3; v < 256; v++)
+            {
+                if (v >= 0xA0 && v <= 0xA5) continue; // 왼쪽/오른쪽 Shift·Ctrl·Alt는 0x10~0x12로 받음
+                bool down = KeyNames.IsDown(v);
+                if (!down) { downAtCaptureStart[v] = false; continue; }
+                if (downAtCaptureStart[v]) continue;
+
+                if (v == 0x1B) { StopCapture("바꾸지 않았어요", Muted); return; }
+                string why = KeyNames.ForbiddenReason(v);
+                if (why != null) { StopCapture(why, Warn); return; }
+                StopCapture(null, Muted);
+                app.SetTrigger(v);
+                ShowKeyNote(KeyNames.Name(v) + (KeyNames.IsMouse(v) ? "으로" : " 키로") + " 바꿨어요", Good);
+                return;
+            }
+        }
+
+        void StopCapture(string message, Color color)
+        {
+            capturing = false;
+            captureTimer.Stop();
+            keyBtn.Text = "키 변경";
+            keyBtn.BackColor = Accent;
+            if (message != null) ShowKeyNote(message, color);
+        }
+
+        void ShowKeyNote(string message, Color color)
+        {
+            keyNote.Text = message;
+            keyNote.ForeColor = color;
+        }
+
+        // 키를 고르는 동안 눌린 키가 창의 버튼 등을 작동시키지 않게
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (capturing) return true;
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (capturing) { e.Handled = true; e.SuppressKeyPress = true; return; }
+            base.OnKeyDown(e);
         }
 
         // ---------------- 레이아웃 도우미 ----------------
