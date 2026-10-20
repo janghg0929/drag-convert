@@ -33,7 +33,7 @@ namespace ShiftConvert
 
         readonly float S, R, Rin, Grow, Gap;
         readonly int Dim;
-        readonly Font titleFont, subFont, extFont, segSubFont, markFont;
+        readonly Font titleFont, subFont, extFont, extFontMid, extFontSmall, segSubFont, markFont;
         readonly System.Windows.Forms.Timer hideTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer fadeTimer = new System.Windows.Forms.Timer();
         int opacity = 255;
@@ -49,7 +49,9 @@ namespace ShiftConvert
         State state = State.Waiting;
         List<string> files = new List<string>();
         List<string> targets = new List<string>();
-        Kind kind;
+        Kind kind;                                                          // 첫 파일 종류 (안내 문구용)
+        Dictionary<string, int> support = new Dictionary<string, int>();     // 형식별로 바꿀 수 있는 파일 수
+        Dictionary<string, string> labelFile = new Dictionary<string, string>(); // 형식별 설명 기준 파일
         int hover = -1;
         string msg = "";        // 상태별 보조 문구 (오류 내용, 진행률 등)
         Icon fileIcon;
@@ -74,6 +76,8 @@ namespace ShiftConvert
             titleFont = new Font("Malgun Gothic", 9.5f, FontStyle.Bold);
             subFont = new Font("Malgun Gothic", 8f);
             extFont = new Font("Segoe UI", 13f, FontStyle.Bold);
+            extFontMid = new Font("Segoe UI", 11f, FontStyle.Bold);   // 칸이 많을 때 (종류가 섞인 파일)
+            extFontSmall = new Font("Segoe UI", 9.5f, FontStyle.Bold);
             segSubFont = new Font("Malgun Gothic", 7.5f);
             markFont = new Font("Segoe UI Symbol", 22f, FontStyle.Bold);
 
@@ -246,12 +250,7 @@ namespace ShiftConvert
             }
             else
             {
-                try { fileIcon = Icon.ExtractAssociatedIcon(files[0]); } catch { }
-                kind = Converter.KindOf(files[0]);
-                targets = Converter.TargetsFor(kind, files[0]);
-                var exts = files.Select(Converter.NormExt).Distinct().ToList();
-                if (exts.Count == 1) targets.Remove(exts[0]);
-
+                LoadFiles(files);
                 if (targets.Count > 0) state = State.Ready;
                 else
                 {
@@ -342,8 +341,9 @@ namespace ShiftConvert
             {
                 state = State.Done;
                 doneFile = r.LastOut;
-                if (r.Merged) msg = r.Total + "장 → " + Path.GetFileName(r.LastOut);
-                else msg = r.Total == 1 ? Path.GetFileName(r.LastOut) : r.Total + "개 파일";
+                if (r.Merged && r.Ok == r.Total) msg = r.Total + "장 → " + Path.GetFileName(r.LastOut);
+                else if (r.Ok == 1 && r.Skipped == 0) msg = Path.GetFileName(r.LastOut);
+                else msg = r.Ok + "개 변환" + (r.Skipped > 0 ? " · " + r.Skipped + "개 건너뜀" : "");
                 ScheduleHide(1800);
             }
             else
@@ -489,8 +489,11 @@ namespace ShiftConvert
                     PointF pt = Polar(c, mid, a0 + step / 2);
                     Color fg = dim && !hot ? Color.FromArgb(95, 97, 106) : Color.White;
                     float boxW = Math.Min(110 * S, (float)(2 * Math.PI * mid / n) - 8 * S);
+                    // 칸이 많으면 글자를 줄이고, 줄바꿈 없이 전부 보이게 (안 하면 DOCX가 DOC로 잘림)
+                    Font ef = n <= 8 ? extFont : n <= 10 ? extFontMid : extFontSmall;
+                    var noWrap = new StringFormat(center) { FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip };
                     using (var b = new SolidBrush(fg))
-                        g.DrawString(targets[i].ToUpperInvariant(), extFont, b, new RectangleF(pt.X - boxW / 2, pt.Y - 22 * S, boxW, 26 * S), center);
+                        g.DrawString(targets[i].ToUpperInvariant(), ef, b, new RectangleF(pt.X - boxW / 2, pt.Y - 22 * S, boxW, 26 * S), noWrap);
                     Color sc = hot ? Color.FromArgb(228, 234, 255) : dim ? Color.FromArgb(80, 82, 90) : Muted;
                     var trim = new StringFormat(center) { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
                     using (var b = new SolidBrush(sc))
@@ -540,7 +543,7 @@ namespace ShiftConvert
                     if (hover >= 0)
                     {
                         line("→ " + targets[hover].ToUpperInvariant(), titleFont, Accent, c - 4 * S, 20 * S);
-                        line(files.Count > 1 ? files.Count + "개 파일" : SubLabel(targets[hover]), subFont, Muted, c + 15 * S, 18 * S);
+                        line(CenterLabel(targets[hover]), subFont, Muted, c + 15 * S, 18 * S);
                     }
                     else
                     {
@@ -583,12 +586,43 @@ namespace ShiftConvert
             }
         }
 
+        // 놓은 파일들을 보고 칸(형식) 목록을 만든다. 종류가 섞여 있으면 파일마다 따로 계산해서 합침
+        void LoadFiles(List<string> list)
+        {
+            files = list;
+            if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
+            try { fileIcon = Icon.ExtractAssociatedIcon(files[0]); } catch { }
+            kind = Converter.KindOf(files[0]);
+            targets = Converter.TargetsForAll(files, out support, out labelFile);
+        }
+
+        bool Partial(string fmt) { int n; return support.TryGetValue(fmt, out n) && n < files.Count; }
+
+        // 칸 아래 작은 글씨: 일부 파일만 되는 형식이면 "2/3개"
         string SubLabel(string fmt)
         {
-            if (kind == Kind.Image && fmt == "pdf") return files.Count > 1 ? "한 파일로 합치기" : "문서로";
+            if (Partial(fmt)) return support[fmt] + "/" + files.Count + "개";
+            return BaseLabel(fmt);
+        }
+
+        // 가운데 원 아래 줄
+        string CenterLabel(string fmt)
+        {
+            if (Partial(fmt)) return files.Count + "개 중 " + support[fmt] + "개만";
+            return files.Count > 1 ? files.Count + "개 파일" : BaseLabel(fmt);
+        }
+
+        string BaseLabel(string fmt)
+        {
+            string ctx;
+            if (!labelFile.TryGetValue(fmt, out ctx)) ctx = files.Count > 0 ? files[0] : null;
+            Kind kind = ctx != null ? Converter.KindOf(ctx) : this.kind;
+            if (kind == Kind.Image && fmt == "pdf") return files.Count(f => Converter.KindOf(f) == Kind.Image) > 1 ? "한 파일로 합치기" : "문서로";
+            if (kind == Kind.Image && fmt == "mp4") return "영상 · 작은 용량";
+            if (kind == Kind.Image && fmt == "webm") return "영상 · 웹용";
             if (kind == Kind.Document)
             {
-                string grp = files.Count > 0 ? Docs.GroupOf(files[0]) : null;
+                string grp = ctx != null ? Docs.GroupOf(ctx) : null;
                 switch (fmt)
                 {
                     case "pdf": return "공유 · 인쇄용";
@@ -647,11 +681,7 @@ namespace ShiftConvert
                 f.files = paths.Where(File.Exists).ToList();
                 if (f.files.Count > 0)
                 {
-                    try { f.fileIcon = Icon.ExtractAssociatedIcon(f.files[0]); } catch { }
-                    f.kind = Converter.KindOf(f.files[0]);
-                    f.targets = Converter.TargetsFor(f.kind, f.files[0]);
-                    var exts = f.files.Select(Converter.NormExt).Distinct().ToList();
-                    if (exts.Count == 1) f.targets.Remove(exts[0]);
+                    f.LoadFiles(f.files);
                 }
                 f.state = (State)Enum.Parse(typeof(State), stateName, true);
                 f.hover = hoverIndex;

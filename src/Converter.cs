@@ -100,6 +100,12 @@ namespace ShiftConvert
                 case Kind.Image:
                     var l = new List<string> { "png", "jpg", "pdf", "webp", "bmp", "gif", "tiff", "ico" };
                     if (!ff) l.Remove("webp");
+                    // 움직이는 GIF는 사실상 짧은 영상 → 영상으로도 (MP4는 ffmpeg 없이 Windows 인코더로)
+                    if (sample != null && NormExt(sample) == "gif" && GifVideo.IsAnimated(sample))
+                    {
+                        if (GifVideo.Available || ff) l.Add("mp4");
+                        if (ff) l.Add("webm");
+                    }
                     return l;
                 case Kind.Audio:
                     return ff ? new List<string> { "mp3", "wav", "flac", "m4a", "ogg" } : new List<string>();
@@ -107,6 +113,38 @@ namespace ShiftConvert
                     return ff ? new List<string> { "mp4", "mkv", "webm", "gif", "mp3", "wav" } : new List<string>();
             }
             return new List<string>();
+        }
+
+        // 이 파일 하나를 바꿀 수 있는 형식 (같은 형식으로 바꾸기는 제외)
+        public static List<string> TargetsForFile(string file)
+        {
+            var l = TargetsFor(KindOf(file), file);
+            l.Remove(NormExt(file));
+            return l;
+        }
+
+        // 여러 파일을 한 번에 놓을 때: 어느 파일이든 하나라도 바꿀 수 있는 형식 전부.
+        // 모든 파일에 되는 형식을 앞에, 일부만 되는 형식을 뒤에. support[형식] = 그 형식으로 바꿀 수 있는 파일 수
+        public static List<string> TargetsForAll(List<string> files, out Dictionary<string, int> support, out Dictionary<string, string> firstFile)
+        {
+            support = new Dictionary<string, int>();
+            firstFile = new Dictionary<string, string>();
+            var order = new List<string>();
+            var cache = new Dictionary<string, List<string>>();
+            foreach (string f in files)
+            {
+                string ext = NormExt(f);
+                List<string> t;
+                // 같은 확장자는 한 번만 계산 (GIF는 움직이는지에 따라 달라서 매번)
+                if (ext == "gif" || !cache.TryGetValue(ext, out t)) { t = TargetsForFile(f); if (ext != "gif") cache[ext] = t; }
+                foreach (string fmt in t)
+                {
+                    if (!support.ContainsKey(fmt)) { support[fmt] = 0; order.Add(fmt); firstFile[fmt] = f; }
+                    support[fmt]++;
+                }
+            }
+            var sup = support;
+            return order.Select((fmt, i) => new { fmt, i }).OrderByDescending(x => sup[x.fmt] == files.Count).ThenBy(x => x.i).Select(x => x.fmt).ToList();
         }
 
         // 원본은 그대로 두고 같은 폴더에 새 파일을 만든다. 이름이 겹치면 "이름 (1).ext"
@@ -125,7 +163,8 @@ namespace ShiftConvert
             Kind k = KindOf(src);
             try
             {
-                if (k == Kind.Image && fmt == "pdf") ImagesToPdf(new List<string> { src }, dst);
+                if (k == Kind.Image && (fmt == "mp4" || fmt == "webm")) GifToVideo(src, dst, fmt);
+                else if (k == Kind.Image && fmt == "pdf") ImagesToPdf(new List<string> { src }, dst);
                 else if (k == Kind.Image) ConvertImage(src, dst, fmt);
                 else if (k == Kind.Document) return Docs.Convert(src, dst, fmt);
                 else if (k == Kind.Audio || k == Kind.Video) RunFfmpeg(src, dst, FfArgs(k, fmt));
@@ -139,7 +178,27 @@ namespace ShiftConvert
             return dst;
         }
 
-        public class BatchResult { public int Ok, Total; public string LastOut, Error; public bool Merged, Canceled; }
+        public class BatchResult { public int Ok, Total, Skipped; public string LastOut, Error; public bool Merged, Canceled; }
+
+        // 움직이는 GIF → 영상. MP4는 Windows 인코더 우선(친구들 PC엔 ffmpeg가 거의 없음), 안 되면 ffmpeg
+        static void GifToVideo(string src, string dst, string fmt)
+        {
+            if (fmt == "mp4" && GifVideo.Available)
+            {
+                try { GifVideo.ToMp4(src, dst); return; }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    if (FfmpegPath == null) throw new Exception("영상으로 만들지 못했어요 (" + ex.Message + ")");
+                    Log.Error("Windows 인코더 실패, ffmpeg로 다시 시도: " + ex.Message);
+                    try { if (File.Exists(dst)) File.Delete(dst); } catch { }
+                }
+            }
+            string scale = "-vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -pix_fmt yuv420p";
+            RunFfmpeg(src, dst, fmt == "mp4"
+                ? scale + " -c:v libx264 -crf 20 -preset veryfast -movflags +faststart"
+                : scale + " -c:v libvpx-vp9 -crf 32 -b:v 0 -deadline realtime -cpu-used 8");
+        }
 
         // 변환 묶음 하나의 진행 보고·취소 창구. 변환 코드는 중간중간 Step()을 불러 준다.
         public class Job
@@ -238,38 +297,47 @@ namespace ShiftConvert
             DialogGuard.Start();
             try
             {
-                if (fmt == "pdf" && list.Count > 1 && list.All(f => KindOf(f) == Kind.Image))
+                // 파일마다 확장자를 보고, 이 형식으로 못 바꾸는 파일은 오류가 아니라 "건너뜀"
+                var todo = new List<string>();
+                foreach (string f in list)
                 {
-                    string dst = UniquePath(list[0], "pdf");
+                    if (TargetsForFile(f).Contains(fmt)) todo.Add(f);
+                    else { r.Skipped++; Log.Info("건너뜀: " + Log.Describe(f) + " → " + fmt + " (이 형식으로 바꿀 수 없음)"); }
+                }
+                var images = todo.Where(f => KindOf(f) == Kind.Image).ToList();
+                if (fmt == "pdf" && images.Count > 1)
+                {
+                    // 이미지 여러 장은 PDF 하나로 합치고, 나머지(문서 등)는 따로 변환
+                    string dst = UniquePath(images[0], "pdf");
                     try
                     {
-                        ImagesToPdf(list, dst); r.Ok = list.Count; r.LastOut = dst; r.Merged = true;
-                        Log.Info("변환 성공: 이미지 " + list.Count + "장 → pdf 1개로 합침");
+                        ImagesToPdf(images, dst); r.Ok += images.Count; r.LastOut = dst; r.Merged = true; job.Done = r.Ok;
+                        Log.Info("변환 성공: 이미지 " + images.Count + "장 → pdf 1개로 합침");
                     }
                     catch (Exception ex)
                     {
                         try { if (File.Exists(dst)) File.Delete(dst); } catch { }
                         if (ex is OperationCanceledException) throw;
                         r.Error = ex.Message;
-                        Log.Error("변환 실패: 이미지 " + list.Count + "장 → pdf 합치기: " + Scrub(ex.Message, list[0]));
+                        Log.Error("변환 실패: 이미지 " + images.Count + "장 → pdf 합치기: " + Scrub(ex.Message, images[0]));
                     }
-                    return r;
+                    todo = todo.Where(f => KindOf(f) != Kind.Image).ToList();
                 }
-                for (int i = 0; i < list.Count; i++)
+                for (int i = 0; i < todo.Count; i++)
                 {
-                    Step(list.Count > 1 ? (i + 1) + "/" + list.Count : null);
+                    Step(todo.Count > 1 ? (i + 1) + "/" + todo.Count : null);
                     var sw = Stopwatch.StartNew();
-                    string what = Log.Describe(list[i]) + " → " + fmt;
+                    string what = Log.Describe(todo[i]) + " → " + fmt;
                     try
                     {
-                        r.LastOut = Convert(list[i], fmt); r.Ok++; job.Done = r.Ok;
+                        r.LastOut = Convert(todo[i], fmt); r.Ok++; job.Done = r.Ok;
                         Log.Info("변환 성공: " + what + " (" + sw.Elapsed.TotalSeconds.ToString("0.0") + "초)");
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
-                        r.Error = Path.GetFileName(list[i]) + ": " + (Environment.GetEnvironmentVariable("DRAGCONVERT_DEBUG") != null ? ex.ToString() : ex.Message);
-                        Log.Error("변환 실패: " + what + ": " + Scrub(ex.Message, list[i]));
+                        r.Error = Path.GetFileName(todo[i]) + ": " + (Environment.GetEnvironmentVariable("DRAGCONVERT_DEBUG") != null ? ex.ToString() : ex.Message);
+                        Log.Error("변환 실패: " + what + ": " + Scrub(ex.Message, todo[i]));
                     }
                 }
             }

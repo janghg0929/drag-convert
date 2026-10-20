@@ -83,7 +83,7 @@ namespace ShiftConvert
             {
                 var list = args.Skip(2).Select(Path.GetFullPath).ToList();
                 var r = Converter.RunBatch(list, args[1].ToLowerInvariant(), new Converter.Job());
-                Console.WriteLine("ok " + r.Ok + "/" + r.Total + (r.Merged ? " (merged)" : "") + (r.Canceled ? " (canceled)" : "") + " -> " + r.LastOut);
+                Console.WriteLine("ok " + r.Ok + "/" + r.Total + (r.Skipped > 0 ? " skipped " + r.Skipped : "") + (r.Merged ? " (merged)" : "") + (r.Canceled ? " (canceled)" : "") + " -> " + r.LastOut);
                 if (r.Error != null) Console.WriteLine("ERROR: " + r.Error);
                 return r.Error == null ? 0 : 1;
             }
