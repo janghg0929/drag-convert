@@ -25,12 +25,12 @@ if (-not $DryRun) {
 if ($LASTEXITCODE) { throw "빌드 실패" }
 $dist = Join-Path $PSScriptRoot 'dist'
 New-Item -ItemType Directory -Force $dist | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'ShiftConvert.exe') "$dist\ShiftConvert.exe" -Force
-& "$PSScriptRoot\sign.ps1" -Exe "$dist\ShiftConvert.exe" -Version $ver
+Copy-Item (Join-Path $PSScriptRoot 'DragConvert.exe') "$dist\DragConvert.exe" -Force
+& "$PSScriptRoot\sign.ps1" -Exe "$dist\DragConvert.exe" -Version $ver
 
 # 실제 앱의 검증 코드로 한 번 더 확인 (서명 규칙이 어긋나면 친구들 업데이트가 전부 거부되므로)
-$out = Join-Path $env:TEMP "shiftconvert-verify.txt"
-$p = Start-Process "$dist\ShiftConvert.exe" -ArgumentList '--verify-update', "`"$dist\ShiftConvert.exe`"", "`"$dist\ShiftConvert.exe.sig`"", $ver `
+$out = Join-Path $env:TEMP "dragconvert-verify.txt"
+$p = Start-Process "$dist\DragConvert.exe" -ArgumentList '--verify-update', "`"$dist\DragConvert.exe`"", "`"$dist\DragConvert.exe.sig`"", $ver `
     -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
 $check = Get-Content $out -Raw; Remove-Item $out
 if ($p.ExitCode -ne 0) { throw "앱이 서명을 거부했어요: $check" }
@@ -40,6 +40,6 @@ if ($DryRun) { "dry run 끝: dist\ 에 v$ver 파일이 준비됐어요 (업로�
 
 git push
 if ($LASTEXITCODE) { throw "git push 실패" }
-gh release create "v$ver" "$dist\ShiftConvert.exe" "$dist\ShiftConvert.exe.sig" --title "v$ver" --notes $Notes
+gh release create "v$ver" "$dist\DragConvert.exe" "$dist\DragConvert.exe.sig" --title "v$ver" --notes $Notes
 if ($LASTEXITCODE) { throw "릴리스 업로드 실패" }
 "v$ver 릴리스 완료 — 친구들 프로그램이 하루 안에 업데이트를 알려줘요"

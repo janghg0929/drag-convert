@@ -44,6 +44,7 @@ namespace ShiftConvert
         int batchId;
         DateTime lastProgress;
         Converter.Job job;
+        string doneFile;   // 완료 표시를 누르면 탐색기에서 이 파일을 선택
 
         State state = State.Waiting;
         List<string> files = new List<string>();
@@ -60,7 +61,7 @@ namespace ShiftConvert
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
             AllowDrop = true;
-            Text = "Shift 변환기";
+            Text = "끌어서 변환 메뉴";
             using (var g = Graphics.FromHwnd(IntPtr.Zero)) S = g.DpiX / 96f;
 
             R = 150 * S;      // 바깥 고리 반지름
@@ -90,6 +91,8 @@ namespace ShiftConvert
                 if ((DateTime.Now - last).TotalSeconds < StallSeconds) return;
                 watchdog.Stop();
                 if (job != null) job.Cancel = true; // 나중에 Office가 풀려도 결과를 저장하지 않게
+                Log.Error("변환이 " + StallSeconds + "초 동안 응답이 없어 중단");
+                Converter.KillHidden(job);
                 batchId++; // 멈춘 변환의 결과는 나중에 와도 무시
                 state = State.Error;
                 msg = "응답이 없어 중단했어요. Office·한글 창에 질문이 떠 있는지 확인해 주세요";
@@ -177,10 +180,16 @@ namespace ShiftConvert
         {
             base.OnMouseClick(e);
             float dx = e.X - Dim / 2f, dy = e.Y - Dim / 2f;
-            if (state == State.Busy && dx * dx + dy * dy < Rin * Rin)
+            bool center = dx * dx + dy * dy < Rin * Rin;
+            if (state == State.Busy && center)
             {
                 CancelJob();
                 return;
+            }
+            if (state == State.Done && center && doneFile != null && File.Exists(doneFile))
+            {
+                // 탐색기에서 새 파일을 선택한 상태로 열기
+                try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + doneFile + "\""); } catch { }
             }
             hideTimer.Stop();
             Hide();
@@ -188,6 +197,13 @@ namespace ShiftConvert
 
         void CancelJob()
         {
+            Converter.Job canceled = job;
+            if (canceled != null)
+            {
+                var reaper = new System.Windows.Forms.Timer { Interval = 20000 };
+                reaper.Tick += (s, e) => { reaper.Stop(); reaper.Dispose(); if (!canceled.Finished) Converter.KillHidden(canceled); };
+                reaper.Start();
+            }
             if (job != null) job.Cancel = true;
             batchId++; // 이후에 오는 결과는 무시
             watchdog.Stop();
@@ -281,6 +297,8 @@ namespace ShiftConvert
             msg = fmt.ToUpperInvariant() + "(으)로";
             int id = ++batchId;
             lastProgress = DateTime.Now;
+            doneFile = null;
+            Log.Info("변환 시작: " + list.Count + "개 → " + fmt);
             var j = new Converter.Job();
             j.Report = detail => BeginInvoke((Action)(() =>
             {
@@ -323,6 +341,7 @@ namespace ShiftConvert
             else if (r.Error == null)
             {
                 state = State.Done;
+                doneFile = r.LastOut;
                 if (r.Merged) msg = r.Total + "장 → " + Path.GetFileName(r.LastOut);
                 else msg = r.Total == 1 ? Path.GetFileName(r.LastOut) : r.Total + "개 파일";
                 ScheduleHide(1800);
@@ -552,7 +571,8 @@ namespace ShiftConvert
                 case State.Done:
                     mark("✓", Good);
                     line("완료", titleFont, Good, c + 0 * S, 20 * S);
-                    line(msg, subFont, Muted, c + 19 * S, 18 * S);
+                    line(msg, subFont, Muted, c + 18 * S, 18 * S);
+                    line("눌러서 열기", segSubFont, Color.FromArgb(120, 200, 150), c + 35 * S, 16 * S);
                     break;
 
                 case State.Error:
@@ -619,7 +639,7 @@ namespace ShiftConvert
 
         // ---------------- 미리보기 (디자인 확인용) ----------------
 
-        // ShiftConvert.exe --preview <out.png> <state> <hover> <파일...>
+        // DragConvert.exe --preview <out.png> <state> <hover> <파일...>
         public static void SavePreview(string outPng, string stateName, int hoverIndex, string[] paths)
         {
             using (var f = new PopupForm())

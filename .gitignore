@@ -1,9 +1,9 @@
 # 빌드 결과물 (릴리스 때 dist\에 따로 만들어짐)
-ShiftConvert.exe
+DragConvert.exe
 *.exe.old
 dist/
 
-# 서명 비밀키는 절대 저장소에 넣지 않는다 (원래 %USERPROFILE%\.shiftconvert-signing 에 있음)
+# 서명 비밀키는 절대 저장소에 넣지 않는다 (원래 %USERPROFILE%\.dragconvert-signing 에 있음)
 private-key.xml
 *.pfx
 *.pem

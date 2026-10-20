@@ -33,10 +33,14 @@ namespace ShiftConvert
 
         static string FindFfmpeg()
         {
+            // exe 옆 폴더는 찾지 않는다: 다운로드 폴더 등에 있는 정체불명의 ffmpeg.exe를 실행하지 않게
             var dirs = new List<string>();
-            dirs.Add(AppDomain.CurrentDomain.BaseDirectory);
             string path = Environment.GetEnvironmentVariable("PATH") ?? "";
-            dirs.AddRange(path.Split(';'));
+            foreach (string d in path.Split(';'))
+            {
+                string t = d.Trim().Trim('"');
+                if (t.Length > 0 && Path.IsPathRooted(t)) dirs.Add(t); // "." 같은 상대 경로 제외
+            }
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             dirs.Add(Path.Combine(local, @"Microsoft\WinGet\Links"));
@@ -141,8 +145,68 @@ namespace ShiftConvert
         public class Job
         {
             public volatile bool Cancel;
+            public volatile bool Finished;     // 변환 스레드가 정리까지 끝냈는지
             public volatile int Done;          // 이미 끝난 파일 수
             public Action<string> Report;      // "2/5", "페이지 3/20" 같은 진행 문구
+            readonly List<int> pids = new List<int>();
+            public void AddPid(int pid) { lock (pids) pids.Add(pid); }
+            public int[] Pids { get { lock (pids) return pids.ToArray(); } }
+        }
+
+        // 이번 변환이 새로 띄운 Office·한글 프로세스 기록
+        public static void RegisterPid(int pid) { Job j = current; if (j != null) j.AddPid(pid); }
+
+        // 멈춘 변환이 남긴 "숨은" Office만 끈다. 화면에 창이 보이는 건(사용자가 쓰기 시작한 것) 건드리지 않음
+        public static int KillHidden(Job j)
+        {
+            int n = 0;
+            if (j == null) return 0;
+            foreach (int pid in j.Pids)
+            {
+                try
+                {
+                    using (Process p = Process.GetProcessById(pid))
+                    {
+                        if (p.HasExited) continue;
+                        if (Native.HasVisibleDocumentWindow(pid)) continue; // 질문창만 떠 있는 건 정리 대상
+                        p.Kill();
+                        n++;
+                    }
+                }
+                catch { }
+            }
+            if (n > 0) Log.Info("멈춘 변환이 남긴 숨은 Office/한글 " + n + "개를 껐어요");
+            return n;
+        }
+
+        // 변환이 끝난 뒤: 이번에 띄운 Office가 몇 초 안에 스스로 안 꺼지면(질문창에 막힌 경우 등) 정리
+        static void CleanupOffice(Job j)
+        {
+            int[] pids = j.Pids;
+            if (pids.Length == 0) return;
+            for (int i = 0; i < 30; i++)
+            {
+                bool alive = false;
+                foreach (int pid in pids)
+                    try { using (Process p = Process.GetProcessById(pid)) if (!p.HasExited) alive = true; } catch { }
+                if (!alive) return;
+                System.Threading.Thread.Sleep(200);
+            }
+            KillHidden(j);
+        }
+
+        // 기록에 남길 오류 문구에서 파일 이름·경로를 뺀다
+        static string Scrub(string message, string file)
+        {
+            if (message == null) return "";
+            try
+            {
+                message = message.Replace(file, "(파일)").Replace(Path.GetFileName(file), "(파일)");
+                string dir = Path.GetDirectoryName(file);
+                if (!string.IsNullOrEmpty(dir)) message = message.Replace(dir, "(폴더)");
+            }
+            catch { }
+            return message;
         }
 
         [ThreadStatic] static Job current;
@@ -177,30 +241,47 @@ namespace ShiftConvert
                 if (fmt == "pdf" && list.Count > 1 && list.All(f => KindOf(f) == Kind.Image))
                 {
                     string dst = UniquePath(list[0], "pdf");
-                    try { ImagesToPdf(list, dst); r.Ok = list.Count; r.LastOut = dst; r.Merged = true; }
+                    try
+                    {
+                        ImagesToPdf(list, dst); r.Ok = list.Count; r.LastOut = dst; r.Merged = true;
+                        Log.Info("변환 성공: 이미지 " + list.Count + "장 → pdf 1개로 합침");
+                    }
                     catch (Exception ex)
                     {
                         try { if (File.Exists(dst)) File.Delete(dst); } catch { }
                         if (ex is OperationCanceledException) throw;
                         r.Error = ex.Message;
+                        Log.Error("변환 실패: 이미지 " + list.Count + "장 → pdf 합치기: " + Scrub(ex.Message, list[0]));
                     }
                     return r;
                 }
                 for (int i = 0; i < list.Count; i++)
                 {
                     Step(list.Count > 1 ? (i + 1) + "/" + list.Count : null);
-                    try { r.LastOut = Convert(list[i], fmt); r.Ok++; job.Done = r.Ok; }
+                    var sw = Stopwatch.StartNew();
+                    string what = Log.Describe(list[i]) + " → " + fmt;
+                    try
+                    {
+                        r.LastOut = Convert(list[i], fmt); r.Ok++; job.Done = r.Ok;
+                        Log.Info("변환 성공: " + what + " (" + sw.Elapsed.TotalSeconds.ToString("0.0") + "초)");
+                    }
                     catch (OperationCanceledException) { throw; }
-                    catch (Exception ex) { r.Error = Path.GetFileName(list[i]) + ": " + (Environment.GetEnvironmentVariable("SHIFTCONVERT_DEBUG") != null ? ex.ToString() : ex.Message); }
+                    catch (Exception ex)
+                    {
+                        r.Error = Path.GetFileName(list[i]) + ": " + (Environment.GetEnvironmentVariable("DRAGCONVERT_DEBUG") != null ? ex.ToString() : ex.Message);
+                        Log.Error("변환 실패: " + what + ": " + Scrub(ex.Message, list[i]));
+                    }
                 }
             }
-            catch (OperationCanceledException) { r.Canceled = true; }
+            catch (OperationCanceledException) { r.Canceled = true; Log.Info("변환 취소 (" + r.Ok + "개는 저장됨)"); }
             finally
             {
                 Docs.ReleaseAll();
+                CleanupOffice(job);
                 ComRetryFilter.Revoke();
                 DialogGuard.Stop();
                 current = null;
+                job.Finished = true;
             }
             return r;
         }

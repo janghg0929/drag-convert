@@ -11,16 +11,16 @@ namespace ShiftConvert
     // 자동 업데이트.
     // GitHub 릴리스에서 최신 버전을 확인하고, 개발자 비밀키로 만든 서명이 맞을 때만 받아들인다.
     // → GitHub 계정이 털려도 비밀키 없이는 친구들 PC에 가짜 업데이트를 넣을 수 없다.
-    // 서명 대상: "ShiftConvert-update|버전|exe의 SHA-256"  (옛 버전을 새 버전인 척 다시 올리는 것도 막음)
+    // 서명 대상: "DragConvert-update|버전|exe의 SHA-256"  (옛 버전을 새 버전인 척 다시 올리는 것도 막음)
     static class Updater
     {
         // 업데이트를 받을 GitHub 저장소 ("아이디/저장소 이름"). 비어 있으면 업데이트 기능이 꺼진다
-        public const string Repo = "janghg0929/shift-convert";
+        public const string Repo = "janghg0929/drag-convert";
 
-        // 서명 검증용 공개키. 짝이 되는 비밀키는 개발자 PC(%USERPROFILE%\.shiftconvert-signing)에만 있다
+        // 서명 검증용 공개키. 짝이 되는 비밀키는 개발자 PC(%USERPROFILE%\.dragconvert-signing)에만 있다
         const string PublicKeyXml = "<RSAKeyValue><Modulus>uXfPKWQqp+06rSq3wtS4r7cBFB357ETkKe1FdjKKr6CVgQDDDjPkkzlNFji6Kgl6arHCFonL7tprxmmpOTuBY3eJP3cJide4m1wd6K19bFYdHqNtWFueUx3PERYgbCCIZvttKsYeh6TGSy4eMEAN3JQV3qPx68knRhZqmfOJ7IG9lDugv+jU29RdTxgzWhg5A/JeYXPq3CZkvvfEtJgHv+91bq2Hu++cIpggA9Lvc/PODXlO4ksKdmOGCHpv8n5mKD6CfT8UrWVz2E/VExXZMnaa6QRRMLPQ+gzjC1iMwc7gjQ1dxW0gMxa3nkyR2ZB2llFLWlIYW/h+XVxIvcUA+gfkUDb+fn/3NCXWoJQj4NJ/N3VoEdy9lhVzZwdo32CZm/QWIZA7BzOpfPChv/9TH9D9XKUT3UcDzcz11lVjIH8yl0YhgIV920IebGX7vvy1zVkIeWHwJcmV5yp8OkQxcsekJ2v0QcLz0bNy7/BqdY/85Zt0Wc512WjMnGKnM1n5</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
 
-        const string SignPrefix = "ShiftConvert-update|";
+        const string SignPrefix = "DragConvert-update|";
 
         public class Ready { public string Version, Notes, ExePath; }
 
@@ -29,7 +29,7 @@ namespace ShiftConvert
         {
             get
             {
-                string o = Environment.GetEnvironmentVariable("SHIFTCONVERT_UPDATE_FEED");
+                string o = Environment.GetEnvironmentVariable("DRAGCONVERT_UPDATE_FEED");
                 if (!string.IsNullOrEmpty(o)) return o;
                 return Repo.Length == 0 ? null : "https://api.github.com/repos/" + Repo + "/releases/latest";
             }
@@ -39,7 +39,7 @@ namespace ShiftConvert
 
         public static string DownloadDir
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ShiftConvert", "updates"); }
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DragConvert", "updates"); }
         }
 
         // 새 버전이 있으면 내려받아 서명까지 확인하고 돌려준다. 최신이면 null, 실패하면 null + err
@@ -64,8 +64,8 @@ namespace ShiftConvert
                         var a = o as Dictionary<string, object>;
                         if (a == null) continue;
                         string name = a["name"] as string, url = a["browser_download_url"] as string;
-                        if (name == "ShiftConvert.exe") exeUrl = url;
-                        if (name == "ShiftConvert.exe.sig") sigUrl = url;
+                        if (name == "DragConvert.exe") exeUrl = url;
+                        if (name == "DragConvert.exe.sig") sigUrl = url;
                     }
                 if (exeUrl == null || sigUrl == null) { err = "릴리스에 exe나 서명 파일이 없어요"; return null; }
 
@@ -74,7 +74,7 @@ namespace ShiftConvert
                 Verify(exe, sig, version); // 서명이 틀리면 여기서 예외
 
                 Directory.CreateDirectory(DownloadDir);
-                string path = Path.Combine(DownloadDir, "ShiftConvert-" + version + ".exe");
+                string path = Path.Combine(DownloadDir, "DragConvert-" + version + ".exe");
                 File.WriteAllBytes(path, exe);
                 string notes = rel.ContainsKey("body") ? rel["body"] as string : null;
                 return new Ready { Version = version, Notes = notes ?? "", ExePath = path };
@@ -119,7 +119,7 @@ namespace ShiftConvert
             {
                 if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                 {
-                    wc.Headers[HttpRequestHeader.UserAgent] = "ShiftConvert/" + AppVersion.Current; // GitHub API는 User-Agent 필수
+                    wc.Headers[HttpRequestHeader.UserAgent] = "DragConvert/" + AppVersion.Current; // GitHub API는 User-Agent 필수
                     wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json, application/octet-stream";
                 }
                 return wc.DownloadData(url);

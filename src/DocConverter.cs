@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Media.Imaging;
@@ -93,7 +94,7 @@ namespace ShiftConvert
         {
             string grp = GroupOf(src);
             if (grp == null) throw new Exception("지원하지 않는 문서예요");
-            string tmp = Path.Combine(Path.GetTempPath(), "ShiftConvert", Guid.NewGuid().ToString("N").Substring(0, 8));
+            string tmp = Path.Combine(Path.GetTempPath(), "DragConvert", Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(tmp);
             try
             {
@@ -136,10 +137,11 @@ namespace ShiftConvert
                 }
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception)
+                catch (Exception ex)
                 {
                     if (DialogGuard.Answered)
                         throw new Exception("Office가 '기본 프로그램으로 설정할까요?' 질문을 띄워서 변환이 취소됐어요");
+                    if (IsPasswordError(ex)) throw new Exception("비밀번호가 걸린 문서는 변환할 수 없어요");
                     throw;
                 }
                 if (made == null) made = new List<string> { tdst };
@@ -161,7 +163,7 @@ namespace ShiftConvert
         {
             try
             {
-                string root = Path.Combine(Path.GetTempPath(), "ShiftConvert");
+                string root = Path.Combine(Path.GetTempPath(), "DragConvert");
                 if (!Directory.Exists(root)) return;
                 foreach (string d in Directory.GetDirectories(root))
                     try { if ((DateTime.Now - Directory.GetCreationTime(d)).TotalHours > 1) Directory.Delete(d, true); } catch { }
@@ -182,9 +184,20 @@ namespace ShiftConvert
 
         // ---- COM 늦은 바인딩 도우미 (dynamic은 Office에서 WeakReference 오류가 나서 InvokeMember 사용) ----
 
+        // InvokeMember는 Office 오류를 TargetInvocationException으로 감싸서 "호출 대상이 예외를…"만 보이게 한다 → 속 오류를 꺼냄
+        static object Inv(object o, string name, BindingFlags flags, object[] args, string[] names)
+        {
+            try { return o.GetType().InvokeMember(name, flags, null, o, args, null, null, names); }
+            catch (TargetInvocationException ex)
+            {
+                if (ex.InnerException != null) ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+                throw;
+            }
+        }
+
         static object Call(object o, string name, params object[] args)
         {
-            return o.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, o, args);
+            return Inv(o, name, BindingFlags.InvokeMethod, args, null);
         }
 
         // 이름 붙은 인수: Named(o, "Open", "FileName", path, "ReadOnly", true, ...)  값이 Type.Missing이면 생략
@@ -198,17 +211,17 @@ namespace ShiftConvert
                 names.Add((string)pairs[i]);
                 vals.Add(pairs[i + 1]);
             }
-            return o.GetType().InvokeMember(name, BindingFlags.InvokeMethod, null, o, vals.ToArray(), null, null, names.ToArray());
+            return Inv(o, name, BindingFlags.InvokeMethod, vals.ToArray(), names.ToArray());
         }
 
         static object Get(object o, string name, params object[] args)
         {
-            return o.GetType().InvokeMember(name, BindingFlags.GetProperty, null, o, args);
+            return Inv(o, name, BindingFlags.GetProperty, args, null);
         }
 
         static void Set(object o, string name, object value)
         {
-            o.GetType().InvokeMember(name, BindingFlags.SetProperty, null, o, new[] { value });
+            Inv(o, name, BindingFlags.SetProperty, new[] { value }, null);
         }
 
         static int Count(object collection)
@@ -220,7 +233,25 @@ namespace ShiftConvert
         {
             Type t = Type.GetTypeFromProgID(progId);
             if (t == null) throw new Exception(progId + " 이 설치돼 있지 않아요");
-            return Activator.CreateInstance(t);
+            string proc = progId == WORD ? "WINWORD" : progId == EXCEL ? "EXCEL" : progId == PPT ? "POWERPNT" : "Hwp";
+            var before = new HashSet<int>(Process.GetProcessesByName(proc).Select(p => p.Id));
+            object app = Activator.CreateInstance(t);
+            foreach (Process p in Process.GetProcessesByName(proc))
+            {
+                if (!before.Contains(p.Id)) Converter.RegisterPid(p.Id);
+                p.Dispose();
+            }
+            return app;
+        }
+
+        // 비밀번호 걸린 문서를 열면 숨은 Office가 비밀번호 창을 띄우고 기다리며 멈춘다.
+        // 일부러 틀린 비밀번호를 넘기면 보호된 문서는 바로 실패하고, 보호 안 된 문서는 그냥 열린다.
+        const string NoPassword = "__dragconvert_no_password__";
+
+        static bool IsPasswordError(Exception ex)
+        {
+            string m = ex.Message ?? "";
+            return m.Contains("암호") || m.Contains("비밀번호") || m.IndexOf("password", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         static void Release(object o)
@@ -286,7 +317,8 @@ namespace ShiftConvert
             if (Converter.NormExt(src) == "txt") enc = IsUtf8(src) ? 65001 : Encoding.Default.CodePage; // PrepareText 후라 UTF-8이면 BOM 있음
 
             object doc = Named(Get(word, "Documents"), "Open", "FileName", src, "ConfirmConversions", false, "ReadOnly", true,
-                "AddToRecentFiles", false, "Visible", false, "Encoding", enc);
+                "AddToRecentFiles", false, "PasswordDocument", NoPassword, "WritePasswordDocument", NoPassword,
+                "Visible", false, "Encoding", enc);
             try
             {
                 Named(doc, "SaveAs2", "FileName", dst, "FileFormat", code, "Encoding", fmt == "txt" ? (object)65001 : Type.Missing,
@@ -313,7 +345,10 @@ namespace ShiftConvert
                 Set(excel, "DisplayAlerts", false);
                 Set(excel, "ScreenUpdating", false);
             }
-            object wb = Named(Get(excel, "Workbooks"), "Open", "Filename", src, "UpdateLinks", 0, "ReadOnly", true, "AddToMru", false);
+            // Excel은 이 조합을 이름 붙은 인수로 넘기면 거부해서 위치 인수로 넘긴다
+            // (Filename, UpdateLinks, ReadOnly, Format, Password, WriteResPassword, IgnoreReadOnlyRecommended, Origin, Delimiter, Editable, Notify, Converter, AddToMru)
+            object M = Type.Missing;
+            object wb = Call(Get(excel, "Workbooks"), "Open", src, 0, true, M, NoPassword, M, true, M, M, M, M, M, false);
             try
             {
                 switch (fmt)
@@ -347,7 +382,8 @@ namespace ShiftConvert
             try { oldSec = Get(ppt, "AutomationSecurity"); Set(ppt, "AutomationSecurity", 3); } catch { }
             try
             {
-                return Named(Get(ppt, "Presentations"), "Open", "FileName", src, "ReadOnly", -1, "Untitled", 0, "WithWindow", 0);
+                // PowerPoint는 "파일경로::비밀번호::" 형식으로 열기 비밀번호를 넘긴다
+                return Named(Get(ppt, "Presentations"), "Open", "FileName", src + "::" + NoPassword + "::", "ReadOnly", -1, "Untitled", 0, "WithWindow", 0);
             }
             finally
             {
@@ -625,8 +661,8 @@ namespace ShiftConvert
 
         static void Log(string m)
         {
-            if (Environment.GetEnvironmentVariable("SHIFTCONVERT_DEBUG") == null) return;
-            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "shiftconvert-guard.log"), DateTime.Now.ToString("HH:mm:ss.fff ") + m + Environment.NewLine); } catch { }
+            if (Environment.GetEnvironmentVariable("DRAGCONVERT_DEBUG") == null) return;
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "dragconvert-guard.log"), DateTime.Now.ToString("HH:mm:ss.fff ") + m + Environment.NewLine); } catch { }
         }
 
         static void AnswerNo(IntPtr dlg)
