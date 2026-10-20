@@ -35,8 +35,133 @@ namespace ShiftConvert
         readonly int Dim;
         readonly Font titleFont, subFont, extFont, extFontMid, extFontSmall, segSubFont, markFont;
         readonly System.Windows.Forms.Timer hideTimer = new System.Windows.Forms.Timer();
-        readonly System.Windows.Forms.Timer fadeTimer = new System.Windows.Forms.Timer();
         int opacity = 255;
+
+        // ---------------- 애니메이션 ----------------
+        // 움직일 때만 타이머가 돌며 다시 그린다. 칸 판정(HitTest)은 애니메이션과 무관하게 원래 위치 기준.
+        readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
+        double tShown = -10, tState = -10, tClose = -10, lastTick;
+        double? fakeNow;                       // 미리보기용 가짜 시각
+        bool closing;
+        float[] hoverAmt = new float[0];       // 칸마다 "마우스 올림" 정도 (0~1, 부드럽게 따라감)
+        State lastState = State.Waiting;
+        readonly List<Particle> confetti = new List<Particle>();
+        readonly Random rng = new Random();
+        static readonly bool Motion = AnimationsOn();
+        static readonly Color[] ConfettiColors =
+        {
+            Color.FromArgb(76, 125, 255), Color.FromArgb(90, 205, 130), Color.FromArgb(255, 200, 70),
+            Color.FromArgb(240, 100, 160), Color.FromArgb(160, 110, 255), Color.FromArgb(80, 210, 230)
+        };
+
+        class Particle { public float X, Y, VX, VY, Rot, VR, W, H; public Color Col; public double Born, Life; }
+
+        double Now { get { return fakeNow ?? clock.Elapsed.TotalSeconds; } }
+
+        [DllImport("user32.dll")] static extern bool SystemParametersInfo(int action, int param, ref bool value, int ini);
+
+        // Windows 설정 > 접근성 > 시각 효과 > "애니메이션 효과"가 꺼져 있으면 애니메이션 없이
+        static bool AnimationsOn()
+        {
+            bool on = true;
+            try { SystemParametersInfo(0x1042 /* SPI_GETCLIENTAREAANIMATION */, 0, ref on, 0); } catch { }
+            return on;
+        }
+
+        static float Clamp01(double v) { return (float)Math.Max(0, Math.Min(1, v)); }
+        static float EaseOutCubic(float t) { float u = 1 - t; return 1 - u * u * u; }
+        static float EaseInCubic(float t) { return t * t * t; }
+        static float EaseOutBack(float t) { const float c1 = 1.9f, c3 = c1 + 1; float u = t - 1; return 1 + c3 * u * u * u + c1 * u * u; }
+        static Color Lerp(Color a, Color b, float t)
+        {
+            return Color.FromArgb((int)(a.A + (b.A - a.A) * t), (int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+        }
+
+        void StartAnim()
+        {
+            if (!Motion || fakeNow != null) return;
+            if (!anim.Enabled) { lastTick = Now; anim.Start(); }
+        }
+
+        void AnimTick()
+        {
+            double now = Now, dt = Math.Min(0.05, now - lastTick);
+            lastTick = now;
+            StepAnim(dt);
+            if (closing && now - tClose > 0.16) { closing = false; anim.Stop(); base.Hide(); return; }
+            Redraw();
+            if (!NeedsAnim()) anim.Stop();
+        }
+
+        // 시간 dt(초)만큼 진행: 마우스 올림 정도, 색종이 물리, 투명도
+        void StepAnim(double dt)
+        {
+            double now = Now;
+            for (int i = 0; i < hoverAmt.Length; i++)
+            {
+                float target = i == hover ? 1 : 0;
+                hoverAmt[i] += (target - hoverAmt[i]) * Clamp01(dt * 16);
+            }
+            float g = 1100 * S;
+            for (int k = confetti.Count - 1; k >= 0; k--)
+            {
+                Particle p = confetti[k];
+                if (now - p.Born > p.Life) { confetti.RemoveAt(k); continue; }
+                p.VY += (float)(g * dt);
+                p.VX *= (float)Math.Pow(0.5, dt);   // 공기 저항
+                p.X += (float)(p.VX * dt);
+                p.Y += (float)(p.VY * dt);
+                p.Rot += (float)(p.VR * dt);
+            }
+            opacity = closing ? (int)(255 * (1 - Clamp01((now - tClose) / 0.16))) : (int)(255 * EaseOutCubic(Clamp01((now - tShown) / 0.14)));
+        }
+
+        bool NeedsAnim()
+        {
+            if (!Visible) return false;
+            double now = Now;
+            if (closing || now - tShown < 0.7 || confetti.Count > 0) return true;
+            for (int i = 0; i < hoverAmt.Length; i++) if (Math.Abs(hoverAmt[i] - (i == hover ? 1 : 0)) > 0.01f) return true;
+            if (state == State.Busy || state == State.Waiting || state == State.Ready) return true; // 회전 스피너 / 테두리 빛줄기
+            if (state == State.Done && now - tState < 0.8) return true;
+            if (state == State.Error && now - tState < 0.5) return true;
+            return false;
+        }
+
+        // 상태가 바뀌는 순간: 완료면 색종이 터뜨리기
+        void OnStateChanged()
+        {
+            tState = Now;
+            if (state == State.Done && Motion) Burst();
+        }
+
+        void Burst()
+        {
+            float c = Dim / 2f;
+            for (int k = 0; k < 56; k++)
+            {
+                double a = rng.NextDouble() * Math.PI * 2;
+                float sp = (float)(260 + rng.NextDouble() * 420) * S;
+                confetti.Add(new Particle
+                {
+                    X = c, Y = c, VX = (float)Math.Cos(a) * sp, VY = (float)Math.Sin(a) * sp - 260 * S,
+                    Rot = (float)(rng.NextDouble() * 360), VR = (float)(rng.NextDouble() * 900 - 450),
+                    W = (float)(4 + rng.NextDouble() * 5) * S, H = (float)(2.5 + rng.NextDouble() * 3) * S,
+                    Col = ConfettiColors[rng.Next(ConfettiColors.Length)], Born = Now, Life = 1.1 + rng.NextDouble() * 0.5
+                });
+            }
+        }
+
+        // 닫힐 때 쏙 작아지며 사라짐
+        new void Hide()
+        {
+            if (!Motion || !Visible || fakeNow != null) { closing = false; base.Hide(); return; }
+            if (closing) return;
+            closing = true;
+            tClose = Now;
+            StartAnim();
+        }
 
         // 변환 감시: Office/한글이 질문창 등으로 멈추면 일정 시간 뒤 포기하고 다음 변환을 받을 수 있게
         const int StallSeconds = 180;
@@ -104,13 +229,7 @@ namespace ShiftConvert
                 Redraw();
                 ScheduleHide(6000);
             };
-            fadeTimer.Interval = 15;
-            fadeTimer.Tick += (s, e) =>
-            {
-                opacity = Math.Min(255, opacity + 60);
-                if (opacity >= 255) fadeTimer.Stop();
-                Redraw();
-            };
+            anim.Tick += (s, e) => AnimTick();
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -135,17 +254,20 @@ namespace ShiftConvert
         public void ShowAt(Point cursor)
         {
             hideTimer.Stop();
-            if (state == State.Busy) { Show(); BringToTop(); Redraw(); return; }
+            if (state == State.Busy) { closing = false; opacity = 255; Show(); BringToTop(); Redraw(); StartAnim(); return; }
             state = State.Waiting;
             files.Clear(); targets.Clear(); hover = -1; msg = "";
             if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
             // 원의 중심이 커서 → 살짝만 움직여도 DragEnter가 와서 파일 종류를 알 수 있고, 바깥 칸으로 밀어 놓으면 끝
             Location = Clamp(new Point(cursor.X - Dim / 2, cursor.Y - Dim / 2), cursor);
-            opacity = 0;
+            closing = false;
+            confetti.Clear();
+            tShown = Now;
+            opacity = Motion ? 0 : 255;
             Redraw();
             Show();
             BringToTop();
-            fadeTimer.Start();
+            StartAnim();
         }
 
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, int flags);
@@ -269,7 +391,7 @@ namespace ShiftConvert
         {
             base.OnDragOver(e);
             int h = state == State.Ready ? HitTest(PointToClient(new Point(e.X, e.Y))) : -1;
-            if (h != hover) { hover = h; Redraw(); }
+            if (h != hover) { hover = h; Redraw(); StartAnim(); }
             // 항상 "복사"로만 받는다. Shift 때문에 "이동"이 되면 탐색기가 원본을 지울 수 있음
             e.Effect = (h >= 0 && (e.AllowedEffect & DragDropEffects.Copy) != 0) ? DragDropEffects.Copy : DragDropEffects.None;
         }
@@ -277,7 +399,7 @@ namespace ShiftConvert
         protected override void OnDragLeave(EventArgs e)
         {
             base.OnDragLeave(e);
-            if (hover != -1) { hover = -1; Redraw(); }
+            if (hover != -1) { hover = -1; Redraw(); StartAnim(); }
         }
 
         protected override void OnDragDrop(DragEventArgs e)
@@ -352,8 +474,9 @@ namespace ShiftConvert
                 msg = (r.Ok > 0 ? (r.Total - r.Ok) + "개 실패 · " : "") + r.Error;
                 ScheduleHide(5000);
             }
-            if (!Visible) { opacity = 255; Show(); }
+            if (!Visible || closing) { closing = false; tShown = Now; opacity = Motion ? 0 : 255; Show(); }
             Redraw();
+            StartAnim();
         }
 
         // ---------------- 레이어드 창 출력 ----------------
@@ -370,27 +493,84 @@ namespace ShiftConvert
 
         void Redraw()
         {
+            if (state != lastState) { lastState = state; OnStateChanged(); }
+            if (!Motion) opacity = 255;
             if (!IsHandleCreated) return;
-            using (Bitmap bmp = Render())
+            var frameClock = System.Diagnostics.Stopwatch.StartNew();
+            EnsureSurface();
+            using (var g = Graphics.FromImage(surface)) RenderTo(g);
+            IntPtr screen = GetDC(IntPtr.Zero);
+            try
             {
-                IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen);
-                IntPtr hbmp = bmp.GetHbitmap(Color.FromArgb(0)), old = SelectObject(mem, hbmp);
-                try
+                var size = new SIZE { cx = Dim, cy = Dim };
+                var src = new Native.POINT();
+                var dst = new Native.POINT { X = Left, Y = Top };
+                var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = (byte)opacity, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
+                UpdateLayeredWindow(Handle, screen, ref dst, ref size, surfDC, ref src, 0, ref blend, 2 /* ULW_ALPHA */);
+                if (measureFrames) FrameMs.Add(frameClock.Elapsed.TotalMilliseconds);
+            }
+            finally { ReleaseDC(IntPtr.Zero, screen); }
+        }
+
+        // 화면용 그림판: 한 번 만든 DIB 메모리에 GDI+가 바로 그리고, Windows 창도 그 메모리를 바로 읽음 (매 장면 복사 없음)
+        Bitmap surface, shadow;
+        IntPtr surfDC, surfDib, surfOld;
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFOHEADER { public int biSize, biWidth, biHeight; public short biPlanes, biBitCount; public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant; }
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+
+        void EnsureSurface()
+        {
+            if (surface != null) return;
+            IntPtr screen = GetDC(IntPtr.Zero);
+            surfDC = CreateCompatibleDC(screen);
+            ReleaseDC(IntPtr.Zero, screen);
+            var bi = new BITMAPINFOHEADER { biSize = 40, biWidth = Dim, biHeight = -Dim, biPlanes = 1, biBitCount = 32 };
+            IntPtr bits;
+            surfDib = CreateDIBSection(surfDC, ref bi, 0, out bits, IntPtr.Zero, 0);
+            surfOld = SelectObject(surfDC, surfDib);
+            surface = new Bitmap(Dim, Dim, Dim * 4, PixelFormat.Format32bppPArgb, bits);
+        }
+
+        Bitmap MakeShadow()
+        {
+            var b = new Bitmap(Dim, Dim, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(b))
+            using (var path = new GraphicsPath())
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                float c = Dim / 2f, sr = Dim / 2f - 1;
+                path.AddEllipse(c - sr, c - sr, 2 * sr, 2 * sr);
+                using (var pg = new PathGradientBrush(path))
                 {
-                    var size = new SIZE { cx = Dim, cy = Dim };
-                    var src = new Native.POINT();
-                    var dst = new Native.POINT { X = Left, Y = Top };
-                    var blend = new BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = (byte)opacity, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
-                    UpdateLayeredWindow(Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2 /* ULW_ALPHA */);
-                }
-                finally
-                {
-                    SelectObject(mem, old);
-                    DeleteObject(hbmp);
-                    DeleteDC(mem);
-                    ReleaseDC(IntPtr.Zero, screen);
+                    pg.CenterPoint = new PointF(c, c + 3 * S);
+                    pg.CenterColor = Color.FromArgb(120, 0, 0, 0);
+                    pg.SurroundColors = new[] { Color.FromArgb(0, 0, 0, 0) };
+                    float f = (R - 6 * S) / sr;
+                    pg.FocusScales = new PointF(f, f);
+                    g.FillPath(pg, path);
                 }
             }
+            return b;
+        }
+
+        // 첫 장면에서 그림판·그림자를 만드느라 끊기지 않게 창이 만들어질 때 미리 준비
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            EnsureSurface();
+            if (shadow == null) shadow = MakeShadow();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (surface != null)
+            {
+                surface.Dispose(); surface = null;
+                SelectObject(surfDC, surfOld); DeleteObject(surfDib); DeleteDC(surfDC);
+            }
+            if (shadow != null) { shadow.Dispose(); shadow = null; }
+            base.Dispose(disposing);
         }
 
         // ---------------- 그리기 ----------------
@@ -430,32 +610,49 @@ namespace ShiftConvert
             return new PointF(c + (float)(rad * Math.Cos(a)), c + (float)(rad * Math.Sin(a)));
         }
 
+        // 미리보기용: 새 그림에 그려서 돌려줌
         Bitmap Render()
         {
-            var bmp = new Bitmap(Dim, Dim, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bmp))
+            var bmp = new Bitmap(Dim, Dim, PixelFormat.Format32bppPArgb);
+            using (var g = Graphics.FromImage(bmp)) RenderTo(g);
+            return bmp;
+        }
+
+        void RenderTo(Graphics g)
+        {
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 g.Clear(Color.Transparent);
                 float c = Dim / 2f;
+                double now = Now;
+                if (hoverAmt.Length != targets.Count) { hoverAmt = new float[targets.Count]; if (!Motion && hover >= 0 && hover < targets.Count) hoverAmt[hover] = 1; }
+                if (!Motion) for (int i = 0; i < hoverAmt.Length; i++) hoverAmt[i] = i == hover ? 1 : 0;
 
-                // 그림자
-                using (var path = new GraphicsPath())
+                // 열릴 때 톡 튀어나옴(살짝 커졌다 돌아옴), 닫힐 때 쏙 작아짐, 실패하면 도리도리
+                float openP = Motion ? Clamp01((now - tShown) / 0.34) : 1;
+                float zoom = 0.55f + 0.45f * EaseOutBack(openP);
+                if (closing) zoom *= 1 - 0.18f * EaseInCubic(Clamp01((now - tClose) / 0.16));
+                float shake = 0;
+                if (Motion && state == State.Error)
                 {
-                    float sr = Dim / 2f - 1;
-                    path.AddEllipse(c - sr, c - sr, 2 * sr, 2 * sr);
-                    using (var pg = new PathGradientBrush(path))
-                    {
-                        pg.CenterPoint = new PointF(c, c + 3 * S);
-                        pg.CenterColor = Color.FromArgb(120, 0, 0, 0);
-                        pg.SurroundColors = new[] { Color.FromArgb(0, 0, 0, 0) };
-                        float f = (R - 6 * S) / sr;
-                        pg.FocusScales = new PointF(f, f);
-                        g.FillPath(pg, path);
-                    }
+                    float ep = Clamp01((now - tState) / 0.45);
+                    shake = (float)Math.Sin((now - tState) * 55) * 8 * S * (1 - ep);
                 }
+                // 크기가 변하는 중(열림·닫힘)엔 글자를 그리지 않음: 배율이 매번 달라지면 글자 캐시를 못 써서 장면당 30ms 이상 걸림
+                // → 원이 자리를 잡은 뒤 글자가 스르륵 나타남
+                bool textOK = !Motion || (!closing && openP >= 1);
+                float textA = Motion ? Clamp01((now - tShown - 0.34) / 0.14) : 1;
+                // 그림자 (한 번만 그려 두고 재사용). 크기 변환 없이 그려야 빠름: 배율이 1이 아니면 그림 전체를 매번 다시 계산해서 장면당 30ms+
+                // → 원이 거의 다 커졌을 때만, 닫히는 중엔 생략
+                if (shadow == null) shadow = MakeShadow();
+                if (!closing && zoom > 0.92f) g.DrawImageUnscaled(shadow, (int)shake, 0);
+                g.TranslateTransform(c + shake, c);
+                g.ScaleTransform(zoom, zoom);
+                g.TranslateTransform(-c, -c);
+
+
 
                 // 바탕 원 (칸 사이 틈으로 보이는 선 색)
                 using (var b = new SolidBrush(Backdrop)) g.FillEllipse(b, c - R, c - R, 2 * R, 2 * R);
@@ -478,12 +675,25 @@ namespace ShiftConvert
                 for (int i = 0; i < n; i++)
                 {
                     bool hot = i == hover;
+                    float amt = i < hoverAmt.Length ? hoverAmt[i] : (hot ? 1 : 0);
                     float a0 = -90 + i * step;
-                    float r1 = hot ? R + Grow : R;
-                    Color bg = hot ? (state == State.Done ? Good : state == State.Error ? Bad : Accent) : dim ? SegDim : SegBg;
+                    // 시계 방향으로 하나씩 꽃 피듯 펼쳐짐
+                    float bloom = Motion ? EaseOutCubic(Clamp01((now - tShown - 0.04 - i * Math.Min(0.035, 0.32 / n)) / 0.24)) : 1;
+                    if (bloom <= 0) continue;
+                    float full = R + Grow * amt;
+                    float r1 = Rin + (full - Rin) * bloom;
+                    Color hotCol = state == State.Done ? Good : state == State.Error ? Bad : Accent;
+                    Color bg = Lerp(dim ? SegDim : SegBg, hotCol, amt);
+                    // 빛 번짐
+                    if (amt > 0.02f)
+                        for (int k = 2; k >= 1; k--)
+                            using (var glow = Segment(c, Rin + Gap * 0.5f, r1 + k * 3.5f * S, a0 - k * 0.9f, step + k * 1.8f, Gap))
+                            using (var gb = new SolidBrush(Color.FromArgb((int)(52 * amt / k), hotCol)))
+                                g.FillPath(gb, glow);
                     using (var path = Segment(c, Rin + Gap * 0.5f, r1, a0, step, Gap))
                     using (var b = new SolidBrush(bg))
                         g.FillPath(b, path);
+                    if (bloom < 0.35f || !textOK) continue;
 
                     float mid = (Rin + r1) / 2 + 4 * S;
                     PointF pt = Polar(c, mid, a0 + step / 2);
@@ -492,11 +702,16 @@ namespace ShiftConvert
                     // 칸이 많으면 글자를 줄이고, 줄바꿈 없이 전부 보이게 (안 하면 DOCX가 DOC로 잘림)
                     Font ef = n <= 8 ? extFont : n <= 10 ? extFontMid : extFontSmall;
                     var noWrap = new StringFormat(center) { FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip };
-                    using (var b = new SolidBrush(fg))
+                    // 마우스 올린 칸 글자는 살짝 커짐
+                    var saved = g.Save();
+                    float ls = 1 + 0.12f * amt;
+                    g.TranslateTransform(pt.X, pt.Y - 9 * S); g.ScaleTransform(ls, ls); g.TranslateTransform(-pt.X, -(pt.Y - 9 * S));
+                    using (var b = new SolidBrush(Color.FromArgb((int)(255 * textA), fg)))
                         g.DrawString(targets[i].ToUpperInvariant(), ef, b, new RectangleF(pt.X - boxW / 2, pt.Y - 22 * S, boxW, 26 * S), noWrap);
+                    g.Restore(saved);
                     Color sc = hot ? Color.FromArgb(228, 234, 255) : dim ? Color.FromArgb(80, 82, 90) : Muted;
                     var trim = new StringFormat(center) { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
-                    using (var b = new SolidBrush(sc))
+                    using (var b = new SolidBrush(Color.FromArgb((int)(sc.A * textA), sc)))
                         g.DrawString(SubLabel(targets[i]), segSubFont, b, new RectangleF(pt.X - boxW / 2, pt.Y + 3 * S, boxW, 16 * S), trim);
                 }
 
@@ -504,9 +719,59 @@ namespace ShiftConvert
                 float rc = Rin - Gap;
                 using (var b = new SolidBrush(CenterBg)) g.FillEllipse(b, c - rc, c - rc, 2 * rc, 2 * rc);
                 using (var pen = new Pen(Border, 1.2f * S)) g.DrawEllipse(pen, c - rc, c - rc, 2 * rc, 2 * rc);
-                DrawCenter(g, c, rc, center);
+                if (textOK) DrawCenter(g, c, rc, center);
+
+                if (Motion)
+                {
+                    // 대기 중: 바깥 테두리를 따라 도는 빛줄기 (꼬리가 점점 흐려짐)
+                    if (state == State.Waiting || state == State.Ready)
+                    {
+                        float head = (float)((now * 110) % 360);
+                        for (int k = 0; k < 7; k++)
+                            using (var pen = new Pen(Color.FromArgb((int)(150 * (1 - k / 7f) * openP), 170, 195, 255), 2.4f * S))
+                            {
+                                pen.StartCap = pen.EndCap = LineCap.Round;
+                                g.DrawArc(pen, c - R + S, c - R + S, 2 * R - 2 * S, 2 * R - 2 * S, head - k * 9f, 9f);
+                            }
+                    }
+                    // 변환 중: 가운데 원을 도는 스피너
+                    if (state == State.Busy)
+                    {
+                        float start = (float)((now * 320) % 360);
+                        float sweep = 60 + 45 * (float)Math.Sin(now * 3.2);
+                        using (var pen = new Pen(Accent, 3.2f * S))
+                        {
+                            pen.StartCap = pen.EndCap = LineCap.Round;
+                            g.DrawArc(pen, c - rc, c - rc, 2 * rc, 2 * rc, start, sweep);
+                        }
+                    }
+                    // 완료: 초록 물결이 바깥으로 퍼짐
+                    if (state == State.Done)
+                    {
+                        float rp = Clamp01((now - tState) / 0.75);
+                        if (rp < 1)
+                        {
+                            float rr = rc + (R + 16 * S - rc) * EaseOutCubic(rp);
+                            using (var pen = new Pen(Color.FromArgb((int)(220 * (1 - rp)), Good), (5 * (1 - rp) + 1) * S))
+                                g.DrawEllipse(pen, c - rr, c - rr, 2 * rr, 2 * rr);
+                        }
+                    }
+                }
+                g.ResetTransform();
+
+                // 색종이 (원 밖으로도 날아감)
+                foreach (Particle p in confetti)
+                {
+                    double age = now - p.Born;
+                    int alpha = (int)(255 * Clamp01((p.Life - age) / 0.4));
+                    var st = g.Save();
+                    g.TranslateTransform(p.X, p.Y);
+                    g.RotateTransform(p.Rot);
+                    using (var b = new SolidBrush(Color.FromArgb(alpha, p.Col)))
+                        g.FillRectangle(b, -p.W / 2, -p.H / 2, p.W, p.H);
+                    g.Restore(st);
+                }
             }
-            return bmp;
         }
 
         void DrawCenter(Graphics g, float c, float rc, StringFormat center)
@@ -572,7 +837,7 @@ namespace ShiftConvert
                     break;
 
                 case State.Done:
-                    mark("✓", Good);
+                    DrawCheck(g, c, Motion ? EaseOutCubic(Clamp01((Now - tState - 0.05) / 0.32)) : 1);
                     line("완료", titleFont, Good, c + 0 * S, 20 * S);
                     line(msg, subFont, Muted, c + 18 * S, 18 * S);
                     line("눌러서 열기", segSubFont, Color.FromArgb(120, 200, 150), c + 35 * S, 16 * S);
@@ -586,10 +851,103 @@ namespace ShiftConvert
             }
         }
 
+        // 체크 표시를 획 순서대로 그려 나감 (p = 0~1)
+        void DrawCheck(Graphics g, float c, float p)
+        {
+            if (p <= 0) return;
+            var a = new PointF(c - 13 * S, c - 22 * S);
+            var b = new PointF(c - 4 * S, c - 13 * S);
+            var d = new PointF(c + 14 * S, c - 33 * S);
+            float l1 = 9 * 1.414f, l2 = (float)Math.Sqrt(18 * 18 + 20 * 20), total = l1 + l2, len = total * p;
+            using (var pen = new Pen(Good, 4.2f * S))
+            {
+                pen.StartCap = pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+                if (len <= l1)
+                {
+                    float t = len / l1;
+                    g.DrawLine(pen, a, new PointF(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t));
+                }
+                else
+                {
+                    float t = (len - l1) / l2;
+                    g.DrawLines(pen, new[] { a, b, new PointF(b.X + (d.X - b.X) * t, b.Y + (d.Y - b.Y) * t) });
+                }
+            }
+        }
+
+        // ---------------- 애니메이션 미리보기 (테스트용) ----------------
+
+        // DragConvert.exe --preview-anim <폴더> <파일...> : 열림·마우스 올림·완료 장면을 시간대별로 저장
+        public static void SaveAnimFrames(string dir, string[] paths)
+        {
+            Directory.CreateDirectory(dir);
+            using (var f = new PopupForm())
+            {
+                f.LoadFiles(paths.Where(File.Exists).ToList());
+                f.state = f.lastState = State.Ready;
+                f.fakeNow = 0; f.tShown = 0;
+                int n = 0;
+                Action<string> save = name =>
+                {
+                    using (Bitmap b = f.Render())
+                    using (var bg = new Bitmap(b.Width, b.Height))
+                    using (var g = Graphics.FromImage(bg))
+                    {
+                        g.Clear(Color.FromArgb(200, 210, 225));
+                        g.DrawImage(b, 0, 0);
+                        bg.Save(Path.Combine(dir, (n++).ToString("D2") + "_" + name + ".png"), ImageFormat.Png);
+                    }
+                };
+                Action<double> advance = sec => { for (double t = 0; t < sec - 1e-9; t += 1 / 60.0) { f.fakeNow += 1 / 60.0; f.StepAnim(1 / 60.0); } };
+                foreach (double t in new[] { 0.05, 0.12, 0.2, 0.3, 0.45 }) { advance(t - f.Now); save("open_" + (int)(t * 1000) + "ms"); }
+                f.hover = Math.Min(2, f.targets.Count - 1);
+                advance(0.06); save("hover_60ms");
+                advance(0.3); save("hover_settled");
+                f.state = State.Busy; f.msg = "MP4 · 장면 12/40"; f.Redraw_StateOnly();
+                advance(0.2); save("busy");
+                f.state = State.Done; f.msg = "anim.mp4"; f.Redraw_StateOnly();
+                foreach (double t in new[] { 0.08, 0.2, 0.4, 0.75 }) { advance(t - (f.Now - f.tState)); save("done_" + (int)(t * 1000) + "ms"); }
+                f.state = State.Error; f.msg = "테스트 오류 메시지"; f.Redraw_StateOnly();
+                advance(0.03); save("error_shake");
+            }
+        }
+
+        void Redraw_StateOnly() { if (state != lastState) { lastState = state; OnStateChanged(); } }
+
+        // DragConvert.exe --demo <파일> : 실제 타이머로 화면 가운데에서 열림→칸 훑기→변환 중→완료→닫힘을 재생 (입력 없음)
+        public static readonly List<double> FrameMs = new List<double>();
+        static bool measureFrames; // 데모 모드에서만 장면 시간 기록 (평소에 쌓이면 메모리가 계속 늘어남)
+        public static void RunDemo(string file)
+        {
+            measureFrames = true;
+            var f = new PopupForm();
+            var h = f.Handle;
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            f.ShowAt(new Point(wa.Left + wa.Width / 2, wa.Top + wa.Height / 2));
+            f.LoadFiles(new List<string> { file });
+            f.state = State.Ready;
+            f.Redraw();
+            var steps = new List<KeyValuePair<int, Action>>();
+            int at = 600;
+            for (int i = 0; i < f.targets.Count; i++) { int k = i; steps.Add(new KeyValuePair<int, Action>(at, () => { f.hover = k; f.StartAnim(); })); at += 170; }
+            steps.Add(new KeyValuePair<int, Action>(at, () => { f.hover = 2; f.state = State.Busy; f.msg = "MP4 · 장면 5/40"; f.Redraw(); f.StartAnim(); })); at += 900;
+            steps.Add(new KeyValuePair<int, Action>(at, () => { f.state = State.Done; f.msg = "데모.mp4"; f.Redraw(); f.StartAnim(); })); at += 1500;
+            steps.Add(new KeyValuePair<int, Action>(at, () => f.Hide())); at += 400;
+            steps.Add(new KeyValuePair<int, Action>(at, () => Application.ExitThread()));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var tick = new System.Windows.Forms.Timer { Interval = 10 };
+            int next = 0;
+            tick.Tick += (s, e) => { while (next < steps.Count && sw.ElapsedMilliseconds >= steps[next].Key) steps[next++].Value(); };
+            tick.Start();
+            Application.Run();
+        }
+
         // 놓은 파일들을 보고 칸(형식) 목록을 만든다. 종류가 섞여 있으면 파일마다 따로 계산해서 합침
         void LoadFiles(List<string> list)
         {
             files = list;
+            hoverAmt = new float[0];
             if (fileIcon != null) { fileIcon.Dispose(); fileIcon = null; }
             try { fileIcon = Icon.ExtractAssociatedIcon(files[0]); } catch { }
             kind = Converter.KindOf(files[0]);

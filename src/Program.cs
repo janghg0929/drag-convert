@@ -88,6 +88,26 @@ namespace ShiftConvert
                 return r.Error == null ? 0 : 1;
             }
 
+            // 애니메이션 확인용: DragConvert.exe --preview-anim <폴더> <파일...> (시간대별 장면 저장)
+            if (args.Length >= 3 && args[0] == "--preview-anim")
+            {
+                Native.SetProcessDPIAware();
+                PopupForm.SaveAnimFrames(args[1], args.Skip(2).Select(Path.GetFullPath).ToArray());
+                return 0;
+            }
+
+            // 애니메이션 성능 확인용: DragConvert.exe --demo <파일> (화면 가운데에서 재생하고 장면당 그리는 시간 출력)
+            if (args.Length >= 2 && args[0] == "--demo")
+            {
+                Native.SetProcessDPIAware();
+                PopupForm.RunDemo(Path.GetFullPath(args[1]));
+                var raw = PopupForm.FrameMs; var slow = new System.Text.StringBuilder(); for (int i = 0; i < raw.Count; i++) if (raw[i] > 25) slow.Append("#" + i + "=" + raw[i].ToString("0") + "ms ");
+                Console.WriteLine("slow frames: " + slow);
+                var ms = new System.Collections.Generic.List<double>(raw); ms.Sort();
+                Console.WriteLine("frames " + ms.Count + ", median " + ms[ms.Count / 2].ToString("0.0") + "ms, p95 " + ms[(int)(ms.Count * 0.95)].ToString("0.0") + "ms, max " + ms[ms.Count - 1].ToString("0.0") + "ms");
+                return 0;
+            }
+
             // 디자인 확인용: DragConvert.exe --preview <out.png> <상태> <강조 칸 번호> <파일...>
             if (args.Length >= 4 && args[0] == "--preview")
             {
