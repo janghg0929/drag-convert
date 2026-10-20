@@ -17,7 +17,7 @@ namespace ShiftConvert
         // 업데이트를 받을 GitHub 저장소 ("아이디/저장소 이름"). 비어 있으면 업데이트 기능이 꺼진다
         public const string Repo = "janghg0929/shift-convert";
 
-        // 서명 검증용 공개키. 짝이 되는 비밀키는 개발자 PC(AppData\Local\ShiftConvert-signing)에만 있다
+        // 서명 검증용 공개키. 짝이 되는 비밀키는 개발자 PC(%USERPROFILE%\.shiftconvert-signing)에만 있다
         const string PublicKeyXml = "<RSAKeyValue><Modulus>uXfPKWQqp+06rSq3wtS4r7cBFB357ETkKe1FdjKKr6CVgQDDDjPkkzlNFji6Kgl6arHCFonL7tprxmmpOTuBY3eJP3cJide4m1wd6K19bFYdHqNtWFueUx3PERYgbCCIZvttKsYeh6TGSy4eMEAN3JQV3qPx68knRhZqmfOJ7IG9lDugv+jU29RdTxgzWhg5A/JeYXPq3CZkvvfEtJgHv+91bq2Hu++cIpggA9Lvc/PODXlO4ksKdmOGCHpv8n5mKD6CfT8UrWVz2E/VExXZMnaa6QRRMLPQ+gzjC1iMwc7gjQ1dxW0gMxa3nkyR2ZB2llFLWlIYW/h+XVxIvcUA+gfkUDb+fn/3NCXWoJQj4NJ/N3VoEdy9lhVzZwdo32CZm/QWIZA7BzOpfPChv/9TH9D9XKUT3UcDzcz11lVjIH8yl0YhgIV920IebGX7vvy1zVkIeWHwJcmV5yp8OkQxcsekJ2v0QcLz0bNy7/BqdY/85Zt0Wc512WjMnGKnM1n5</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
 
         const string SignPrefix = "ShiftConvert-update|";
