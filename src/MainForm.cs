@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 janghg0929 — 끌어서 변환 (https://github.com/janghg0929/drag-convert)
+
 using System;
 using System.Drawing;
 using System.Linq;
@@ -68,7 +71,7 @@ namespace ShiftConvert
             var head = Stack(root, Bg, new Padding(0, 0, 0, Px(10)));
             var titleRow = Row(head);
             titleRow.Controls.Add(new Label { Text = "끌어서 변환", Font = title, AutoSize = true, ForeColor = Fg, Margin = new Padding(0, 0, Px(8), 0) });
-            titleRow.Controls.Add(new Label { Text = "버전 " + AppVersion.Current, Font = small, AutoSize = true, ForeColor = Muted, Margin = new Padding(0, Px(14), 0, 0) });
+            titleRow.Controls.Add(new Label { Text = "버전 " + AppVersion.Current + " · GPL-3.0 오픈소스", Font = small, AutoSize = true, ForeColor = Muted, Margin = new Padding(0, Px(14), 0, 0) });
             statusText = Para(head, "", Good, Font);
             enabledBox = Check(head, "사용하기 (끄면 원형 메뉴가 뜨지 않아요)");
             enabledBox.CheckedChanged += (s, e) => { if (!loading) app.SetEnabled(enabledBox.Checked); };
