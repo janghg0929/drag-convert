@@ -987,6 +987,7 @@ namespace ShiftConvert
                 switch (fmt)
                 {
                     case "pdf": return "공유 · 인쇄용";
+                    case "md": return "마크다운";
                     case "docx": return "Word";
                     case "doc": return "Word 97-2003";
                     case "hwp": return "한글";

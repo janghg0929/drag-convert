@@ -26,6 +26,9 @@ namespace ShiftConvert
             Write(rows, xlsxPath, Path.GetFileNameWithoutExtension(csvPath));
         }
 
+        // 마크다운 표 등에서 쓰는: CSV를 칸 목록으로
+        public static List<List<string>> ReadRows(string path) { return Parse(ReadText(path)); }
+
         // BOM이 있으면 그대로, 없으면 UTF-8로 읽어 보고 안 되면 시스템 기본(한국어 Windows는 CP949)
         static string ReadText(string path)
         {

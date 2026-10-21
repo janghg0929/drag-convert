@@ -60,6 +60,8 @@ namespace ShiftConvert
                 case "word":
                     // (Word → 한글은 한컴 자동화가 docx를 열지 못해서 제외)
                     if (Has(WORD)) l.AddRange(new[] { "pdf", "docx", "doc", "odt", "rtf", "txt" });
+                    // 마크다운: docx는 직접 읽어서 Word 불필요, 나머지는 Word로 docx를 거침 (txt → md는 의미가 없어 제외)
+                    if (Converter.NormExt(sample) == "docx" || (Has(WORD) && Converter.NormExt(sample) != "txt")) l.Add("md");
                     break;
                 case "pdf":
                     // PDF → Word는 Word가 열 때마다 "PDF 기본 프로그램" 질문을 띄우고, "아니요"면 열기가 취소돼서 뺐다
@@ -68,12 +70,13 @@ namespace ShiftConvert
                 case "excel":
                     if (Has(EXCEL)) l.AddRange(new[] { "pdf", "xlsx", "xls", "csv", "ods" });
                     else if (Converter.NormExt(sample) == "csv") l.Add("xlsx"); // CSV → XLSX는 직접 만들어서 Excel 불필요
+                    if (Has(EXCEL) || Converter.NormExt(sample) == "csv") l.Add("md"); // CSV → 마크다운 표는 Excel 불필요
                     break;
                 case "ppt":
-                    if (Has(PPT)) l.AddRange(new[] { "pdf", "pptx", "ppt", "odp", "png", "jpg" });
+                    if (Has(PPT)) l.AddRange(new[] { "pdf", "pptx", "ppt", "odp", "png", "jpg", "md" });
                     break;
                 case "hwp":
-                    if (Has(HWP)) l.AddRange(new[] { "pdf", "hwp", "hwpx", "docx", "txt" });
+                    if (Has(HWP)) l.AddRange(new[] { "pdf", "hwp", "hwpx", "docx", "txt", "md" });
                     break;
             }
             return l;
@@ -106,9 +109,19 @@ namespace ShiftConvert
                 PrepareText(tsrc);
                 string tdst = Converter.UniquePath(tsrc, fmt);
                 List<string> made = null;
+                string imagesName = null; // 마크다운 그림 폴더 이름 (최종 위치 기준으로 겹치지 않게)
                 DialogGuard.Answered = false;
                 try
                 {
+                if (fmt == "md")
+                {
+                    string finalDir = Path.GetDirectoryName(dst);
+                    imagesName = Path.GetFileNameWithoutExtension(dst) + "_images";
+                    for (int k = 1; Directory.Exists(Path.Combine(finalDir, imagesName)); k++)
+                        imagesName = Path.GetFileNameWithoutExtension(dst) + "_images (" + k + ")";
+                    ToMarkdown(grp, tsrc, tdst, imagesName, tmp);
+                }
+                else
                 switch (grp)
                 {
                     case "word":
@@ -150,7 +163,13 @@ namespace ShiftConvert
                 if (made == null) made = new List<string> { tdst };
 
                 Converter.Step(null); // 그 사이 취소됐으면 결과를 옮기지 않고 버림
-                if (made.Count == 1) { File.Move(made[0], dst); return dst; }
+                if (made.Count == 1)
+                {
+                    File.Move(made[0], dst);
+                    if (imagesName != null && Directory.Exists(Path.Combine(tmp, imagesName)))
+                        Directory.Move(Path.Combine(tmp, imagesName), Path.Combine(Path.GetDirectoryName(dst), imagesName));
+                    return dst;
+                }
                 List<string> finals = PageOutputs(src, fmt, made.Count);
                 for (int i = 0; i < made.Count; i++) File.Move(made[i], finals[i]);
                 return finals[0];
@@ -339,6 +358,16 @@ namespace ShiftConvert
 
         static void ExcelConvert(string src, string dst, string fmt)
         {
+            EnsureExcel();
+            // Excel은 이 조합을 이름 붙은 인수로 넘기면 거부해서 위치 인수로 넘긴다
+            // (Filename, UpdateLinks, ReadOnly, Format, Password, WriteResPassword, IgnoreReadOnlyRecommended, Origin, Delimiter, Editable, Notify, Converter, AddToMru)
+            object M = Type.Missing;
+            object wb = Call(Get(excel, "Workbooks"), "Open", src, 0, true, M, NoPassword, M, true, M, M, M, M, M, false);
+            ExcelSave(wb, dst, fmt);
+        }
+
+        static void EnsureExcel()
+        {
             if (excel == null)
             {
                 excel = Create(EXCEL);
@@ -348,10 +377,17 @@ namespace ShiftConvert
                 Set(excel, "DisplayAlerts", false);
                 Set(excel, "ScreenUpdating", false);
             }
-            // Excel은 이 조합을 이름 붙은 인수로 넘기면 거부해서 위치 인수로 넘긴다
-            // (Filename, UpdateLinks, ReadOnly, Format, Password, WriteResPassword, IgnoreReadOnlyRecommended, Origin, Delimiter, Editable, Notify, Converter, AddToMru)
+        }
+
+        static object OpenWorkbook(string src)
+        {
+            EnsureExcel();
             object M = Type.Missing;
-            object wb = Call(Get(excel, "Workbooks"), "Open", src, 0, true, M, NoPassword, M, true, M, M, M, M, M, false);
+            return Call(Get(excel, "Workbooks"), "Open", src, 0, true, M, NoPassword, M, true, M, M, M, M, M, false);
+        }
+
+        static void ExcelSave(object wb, string dst, string fmt)
+        {
             try
             {
                 switch (fmt)
@@ -374,6 +410,172 @@ namespace ShiftConvert
             }
             CheckOutput(dst);
         }
+
+        // ---------------- 마크다운 ----------------
+
+        static void ToMarkdown(string grp, string src, string dst, string imagesName, string tmp)
+        {
+            string e = Converter.NormExt(src);
+            switch (grp)
+            {
+                case "word":
+                    if (e == "docx") MarkdownExport.DocxToMd(src, dst, imagesName);
+                    else
+                    {
+                        // doc·rtf·odt: Word로 docx를 만든 뒤 읽음
+                        string docx = Path.Combine(tmp, "md-source.docx");
+                        WordConvert(src, docx, "docx");
+                        MarkdownExport.DocxToMd(docx, dst, imagesName);
+                    }
+                    break;
+                case "hwp":
+                    {
+                        string docx = Path.Combine(tmp, "md-source.docx");
+                        HwpConvert(src, docx, "docx");
+                        MarkdownExport.DocxToMd(docx, dst, imagesName);
+                    }
+                    break;
+                case "excel":
+                    if (e == "csv") MarkdownExport.CsvToMd(src, dst);
+                    else ExcelToMd(src, dst);
+                    break;
+                case "ppt":
+                    PptToMd(src, dst);
+                    break;
+                default:
+                    throw new Exception("이 문서는 마크다운으로 바꿀 수 없어요");
+            }
+            CheckOutput(dst);
+        }
+
+        // 시트마다 "## 시트 이름" + 표
+        static void ExcelToMd(string src, string dst)
+        {
+            object wb = OpenWorkbook(src);
+            try
+            {
+                var sb = new StringBuilder("# " + MarkdownExport.Escape(Path.GetFileNameWithoutExtension(src)) + "\n\n");
+                object sheets = Get(wb, "Worksheets");
+                int n = Count(sheets);
+                for (int i = 1; i <= n; i++)
+                {
+                    Converter.Step(n > 1 ? "시트 " + i + "/" + n : null);
+                    object ws = Get(sheets, "Item", i); // Excel의 Item은 메서드가 아니라 속성
+                    var rows = new List<List<string>>();
+                    // Value는 인수를 받는 속성이라 빈 인수를 넘김 (Value2는 날짜를 숫자로 줘서 안 씀)
+                    object range = Get(ws, "UsedRange"), v;
+                    try { v = Get(range, "Value", Type.Missing); }
+                    catch { v = Get(range, "Value2"); }
+                    var arr = v as object[,];
+                    if (arr != null)
+                    {
+                        for (int r = arr.GetLowerBound(0); r <= arr.GetUpperBound(0); r++)
+                        {
+                            var row = new List<string>();
+                            for (int c = arr.GetLowerBound(1); c <= arr.GetUpperBound(1); c++) row.Add(CellText(arr[r, c]));
+                            rows.Add(row);
+                        }
+                    }
+                    else if (v != null) rows.Add(new List<string> { CellText(v) });
+                    string table = MarkdownExport.Table(rows);
+                    if (n > 1) sb.Append("## ").Append(MarkdownExport.Escape(System.Convert.ToString(Get(ws, "Name")))).Append("\n\n");
+                    sb.Append(table.Length > 0 ? table : "(빈 시트)\n").Append("\n");
+                }
+                MarkdownExport.Save(dst, sb.ToString());
+            }
+            finally
+            {
+                try { Call(wb, "Close", false); } catch { }
+                Release(wb);
+            }
+        }
+
+        static string CellText(object v)
+        {
+            if (v == null) return "";
+            if (v is double) return ((double)v).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            if (v is DateTime) { var d = (DateTime)v; return d.TimeOfDay == TimeSpan.Zero ? d.ToString("yyyy-MM-dd") : d.ToString("yyyy-MM-dd HH:mm"); }
+            if (v is bool) return (bool)v ? "TRUE" : "FALSE";
+            if (v is int) return "#오류"; // Excel 오류값(#N/A 등)은 정수 코드로 옴
+            return MarkdownExport.Escape(System.Convert.ToString(v));
+        }
+
+        // 슬라이드마다 "## 제목" + 내용(글머리표는 목록, 표는 표)
+        static void PptToMd(string src, string dst)
+        {
+            object pres = OpenPres(src);
+            try
+            {
+                var sb = new StringBuilder("# " + MarkdownExport.Escape(Path.GetFileNameWithoutExtension(src)) + "\n\n");
+                object slides = Get(pres, "Slides");
+                int n = Count(slides);
+                for (int i = 1; i <= n; i++)
+                {
+                    Converter.Step("슬라이드 " + i + "/" + n);
+                    object slide = Call(slides, "Item", i);
+                    object shapes = Get(slide, "Shapes");
+                    string title = null;
+                    try { if (Tri(Get(shapes, "HasTitle"))) title = Clean(System.Convert.ToString(Get(Get(Get(Get(shapes, "Title"), "TextFrame"), "TextRange"), "Text"))); } catch { }
+                    sb.Append("## ").Append(string.IsNullOrEmpty(title) ? "슬라이드 " + i : MarkdownExport.Escape(title)).Append("\n\n");
+                    int count = Count(shapes);
+                    for (int j = 1; j <= count; j++)
+                    {
+                        object shape = Call(shapes, "Item", j);
+                        try
+                        {
+                            if (Tri(Get(shape, "HasTable")))
+                            {
+                                object table = Get(shape, "Table");
+                                int rc = Count(Get(table, "Rows")), cc = Count(Get(table, "Columns"));
+                                var rows = new List<List<string>>();
+                                for (int r = 1; r <= rc; r++)
+                                {
+                                    var row = new List<string>();
+                                    for (int c = 1; c <= cc; c++)
+                                        row.Add(MarkdownExport.Escape(Clean(System.Convert.ToString(Get(Get(Get(Get(Call(table, "Cell", r, c), "Shape"), "TextFrame"), "TextRange"), "Text")))));
+                                    rows.Add(row);
+                                }
+                                sb.Append(MarkdownExport.Table(rows)).Append("\n");
+                                continue;
+                            }
+                            if (!Tri(Get(shape, "HasTextFrame"))) continue;
+                            object frame = Get(shape, "TextFrame");
+                            if (!Tri(Get(frame, "HasText"))) continue;
+                            object range = Get(frame, "TextRange");
+                            string all = Clean(System.Convert.ToString(Get(range, "Text")));
+                            if (title != null && all == title) continue; // 제목 칸은 이미 썼음
+                            int pc = Count(Call(range, "Paragraphs"));
+                            bool any = false;
+                            for (int k = 1; k <= pc; k++)
+                            {
+                                object para = Call(range, "Paragraphs", k, 1);
+                                string t = Clean(System.Convert.ToString(Get(para, "Text")));
+                                if (t.Length == 0) continue;
+                                bool bullet = false;
+                                try { bullet = Tri(Get(Get(Get(para, "ParagraphFormat"), "Bullet"), "Visible")); } catch { }
+                                int level = 1;
+                                try { level = System.Convert.ToInt32(Get(para, "IndentLevel")); } catch { }
+                                if (bullet) sb.Append(new string(' ', Math.Max(0, level - 1) * 2)).Append("- ").Append(MarkdownExport.Escape(t)).Append("\n");
+                                else sb.Append(MarkdownExport.Escape(t)).Append("\n\n");
+                                any = true;
+                            }
+                            if (any) sb.Append("\n");
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch { } // 읽을 수 없는 도형은 건너뜀
+                    }
+                }
+                MarkdownExport.Save(dst, sb.ToString().Replace("\n\n\n", "\n\n"));
+            }
+            finally
+            {
+                try { Call(pres, "Close"); } catch { }
+                Release(pres);
+            }
+        }
+
+        static bool Tri(object v) { try { return System.Convert.ToInt32(v) != 0; } catch { return false; } }
+        static string Clean(string s) { return (s ?? "").Replace("\r", " ").Replace("\v", " ").Replace("\n", " ").Trim(); }
 
         // ---------------- PowerPoint ----------------
 

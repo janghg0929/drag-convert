@@ -23,6 +23,7 @@
 | PowerPoint (pptx, ppt, odp) | PDF · PPTX · PPT · ODP · 슬라이드별 PNG/JPG — PowerPoint 필요 |
 | 한글 (hwp, hwpx) | PDF · HWP↔HWPX · DOCX · TXT — 한컴오피스 필요 |
 | PDF | 페이지별 PNG / JPG |
+| 문서·표·슬라이드 → **MD(마크다운)** | docx·csv는 Office 없이, doc·rtf·odt는 Word, hwp·hwpx는 한글, xlsx·xls·ods는 Excel, pptx·ppt·odp는 PowerPoint 필요. 제목·굵게·기울임·목록·표·링크·그림을 옮기고, 그림은  폴더에 저장 |
 | 오디오·영상, WebP 만들기 | ffmpeg가 설치돼 있을 때만 |
 
 ## 알아둘 점
